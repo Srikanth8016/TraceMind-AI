@@ -1,0 +1,73 @@
+# docker-compose.yml — TraceMind AI local development stack
+#
+# Services
+# --------
+# db  : PostgreSQL 16 with a persistent named volume and a health check.
+#
+# Usage
+# -----
+#   docker compose up -d          # start in background
+#   docker compose down           # stop (data survives in named volume)
+#   docker compose down -v        # stop AND delete all data
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+
+    # ------------------------------------------------------------------
+    # Credentials — read from the host environment or .env file.
+    # Change these in .env; never hardcode secrets here.
+    # ------------------------------------------------------------------
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-tracemind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tracemind}
+      POSTGRES_DB:       ${POSTGRES_DB:-tracemind}
+
+    ports:
+      # HOST_PORT:CONTAINER_PORT  (override host port via POSTGRES_PORT env var)
+      - "${POSTGRES_PORT:-5432}:5432"
+
+    volumes:
+      # Named volume — survives ``docker compose down`` but not ``down -v``.
+      - tracemind_pgdata:/var/lib/postgresql/data
+
+    # ------------------------------------------------------------------
+    # Health check
+    # ------------------------------------------------------------------
+    # pg_isready polls PostgreSQL's readiness without needing psql.
+    # interval  : how often to run the check
+    # timeout   : max time to wait for a response
+    # retries   : how many consecutive failures before marking unhealthy
+    # start_period: grace period at startup before failures count
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tracemind} -d ${POSTGRES_DB:-tracemind}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      # Bound specifically to 127.0.0.1 to avoid exposing Redis publicly
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - tracemind_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+# ------------------------------------------------------------------
+# Volumes
+# ------------------------------------------------------------------
+volumes:
+  tracemind_pgdata:
+    driver: local
+  tracemind_redisdata:
+    driver: local
+

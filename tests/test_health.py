@@ -4,27 +4,17 @@ Tests for the /health endpoint.
 We use FastAPI's built-in TestClient (which wraps httpx) to spin up the
 application *in-process* — no network port is needed, no server process to
 start.  This keeps the test suite fast and hermetic.
+
+The ``client`` fixture is defined in ``conftest.py`` and shared across all
+test modules.  Using the shared fixture ensures the DB dependency override
+from conftest is active (so importing app.database does not fail even if
+DATABASE_URL points to a real but unreachable PostgreSQL).
 """
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def client() -> TestClient:
-    """
-    A single TestClient shared across all tests in this module.
-
-    ``scope="module"`` means the client (and the ASGI app lifecycle) is
-    created once and reused — important once we add startup/shutdown events.
-    """
-    with TestClient(app) as c:
-        yield c
+# ``client`` fixture is defined in tests/conftest.py and injected by pytest.
 
 
 # ---------------------------------------------------------------------------
