@@ -19,7 +19,7 @@ Milestone 3 changes
 from typing import Annotated
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -33,6 +33,7 @@ from app.schemas.event import (
     EventResponse,
 )
 from app.schemas.job import EventIngestResponse
+from app.services.task_dispatcher import dispatch_event_processing
 from app.tasks import process_event_task
 from app.utils import sanitize_error
 
@@ -65,12 +66,13 @@ router = APIRouter(prefix="/events", tags=["events"])
     description=(
         "Accept a structured event from any instrumented service. "
         "Persists the event and an associated processing job in PostgreSQL, "
-        "then enqueues a background task via Celery and Redis. "
+        "then enqueues a background task via Celery/Redis or in-process background worker. "
         "Returns HTTP 202 Accepted with the event ID, job ID, and initial status."
     ),
 )
 def create_event(
     payload: EventCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> EventIngestResponse:
     """
@@ -82,9 +84,8 @@ def create_event(
     2. Persist Event record.
     3. Persist ProcessingJob record with status PENDING.
     4. Commit transaction to ensure data is safely stored in PostgreSQL.
-    5. Dispatch Celery task ``process_event_task.delay(str(job.id))``.
-    6. If enqueueing to Redis fails, immediately mark the job FAILED and raise
-       HTTP 503 so the client knows background scheduling failed.
+    5. Dispatch task via Celery/Redis or BackgroundTasks in demo mode.
+    6. If enqueueing to Redis fails in standard mode, mark job FAILED and return 503.
     7. Return HTTP 202 with Event and Job identifiers.
     """
     try:
@@ -116,9 +117,9 @@ def create_event(
     db.refresh(event)
     db.refresh(job)
 
-    # Dispatch to Celery / Redis broker
+    # Dispatch to background task runner (Celery in production, BackgroundTasks in demo mode)
     try:
-        process_event_task.delay(str(job.id))
+        dispatch_event_processing(str(job.id), background_tasks)
     except Exception as enqueue_exc:
         # Consistency recovery: mark job FAILED so it does not falsely appear queued
         job.status = JobStatus.FAILED.value

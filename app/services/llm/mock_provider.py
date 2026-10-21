@@ -43,7 +43,10 @@ class MockLLMProvider(BaseLLMProvider):
             return "This is clearly not a JSON response {{{ broken syntax ..."
 
         # Extract available evidence IDs from the prompt
-        found_ids = re.findall(r'id="(incident:[a-f0-9\-]+|event:[a-f0-9\-]+)"', user_prompt)
+        found_ids = re.findall(
+            r'id="(incident:[a-f0-9\-]+|event:[a-f0-9\-]+|doc:[a-f0-9\-]+:chunk:\d+)"',
+            user_prompt,
+        )
         if not found_ids:
             found_ids = ["incident:default-id"]
 

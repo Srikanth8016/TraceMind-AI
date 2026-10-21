@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# TraceMind AI — Docker build ignore list
+# ---------------------------------------------------------------------------
+
+# Git & IDEs
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Environments and Secrets
+.env
+.env.*
+!.env.example
+
+# Virtual Environments & Caches
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tests & Documentation assets
+tests/
+scratch/
+*.md
+!README.md

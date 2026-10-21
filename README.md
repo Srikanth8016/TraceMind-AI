@@ -542,8 +542,390 @@ Only runtime-volatile tokens are masked; semantic error identifiers and codes ar
    - Unavailable data sources are explicitly supplied as missing to the model, which includes them in the final `missing_evidence` and `limitations` report sections.
 
 4. **Pluggable LLM Provider Abstraction**
-   - `MockLLMProvider`: Zero-cost, deterministic provider used for testing and local development without API keys.
-   - `HTTPLLMProvider`: Standard `httpx`-based provider connecting to OpenAI-compatible endpoints with configurable timeouts, retries, and error sanitization.
+   - `MockLLMProvider`: Zero-cost, deterministic provider used for testing and local development without external API keys.
+   - `HTTPLLMProvider`: Standard `httpx`-based provider connecting to any OpenAI-compatible API:
+     - **Groq** (`LLM_PROVIDER=groq`): Free tier, ultra-high speed, running `llama-3.3-70b-versatile` or `llama-3.1-8b-instant`. Just set `GROQ_API_KEY=gsk_...` from [Groq Console](https://console.groq.com/keys).
+     - **OpenAI** (`LLM_PROVIDER=openai`): Supports standard models (e.g. `gpt-4o-mini`).
+     - **Local / Self-hosted**: Compatible with vLLM, Ollama, and local OpenAI-compatible proxies.
+
+---
+
+## Milestone 10 — Production Readiness & Containerized Operations
+
+Finalizes the platform for production containerized deployment, high-throughput reliability, observability, and automated continuous integration (CI).
+
+### Architecture & Service Responsibilities
+
+```
+                                      [Client Traffic]
+                                             │
+                       ┌─────────────────────┴─────────────────────┐
+                       │ (Public Probes: /health, /ready, /health/db)
+                       ▼ (Protected API: /api/v1/* with X-API-Key)
+           ┌───────────────────────┐
+           │      FastAPI App      │
+           │     (tracemind-api)   │
+           └───────────┬───────────┘
+                       │
+       ┌───────────────┴───────────────┐
+       ▼                               ▼
+┌──────────────┐                ┌──────────────┐
+│  PostgreSQL  │                │    Redis     │
+│  (pgvector)  │                │(Broker/State)│
+└──────────────┘                └──────┬───────┘
+       ▲                               │
+       │                               ▼
+       │                    ┌───────────────────────┐
+       └────────────────────┤     Celery Worker     │
+                            │   (tracemind-worker)  │
+                            └───────────────────────┘
+```
+
+- **`api` (`tracemind-api`)**: FastAPI application server handling event ingestion, incident listing, investigation triggering, and runbook vector retrieval. Enforces API authentication, structured JSON access logging, and request correlation via `X-Request-ID`.
+- **`worker` (`tracemind-worker`)**: Dedicated Celery background process consuming tasks from Redis with bounded retries, task time limits (5m hard / 4m soft), late acknowledgement (`task_acks_late=True`), and prefetch bounding (`worker_prefetch_multiplier=1`).
+- **`db` (`tracemind-db`)**: PostgreSQL 16 database running the `pgvector` extension with persistent storage volume (`tracemind_pgdata`). Single source of truth for events, jobs, incidents, and vector chunks.
+- **`redis` (`tracemind-redis`)**: Redis 7 broker and state backend with persistent storage volume (`tracemind_redisdata`). Bound to localhost/internal network.
+
+### Health, Readiness & Observability Endpoints
+
+| Method | Path | Auth Required | Purpose & Dependencies |
+|--------|------|:-------------:|------------------------|
+| `GET`  | `/health` | No | **Liveness Probe**: Confirms the web process is running. Does not touch DB or Redis. |
+| `GET`  | `/health/db` | No | **Database Probe**: Confirms PostgreSQL connectivity (backwards-compatible). |
+| `GET`  | `/ready` | No | **Full Readiness Probe**: Checks both PostgreSQL and Redis connectivity. Returns HTTP 200 or 503. |
+
+- **Request Correlation**: Incoming requests with `X-Request-ID` are propagated; if absent, an immutable UUID4 correlation ID is assigned and injected into all log statements via `contextvars`.
+- **Safe Error Handling**: Unhandled exceptions are logged with sanitized details and return a generic HTTP 500 JSON payload containing `request_id` without exposing stack traces, DB credentials, or tokens.
+- **Log Formatting**: Production logs emit single-line structured JSON records (`LOG_FORMAT=json`) with automatic redaction of API keys (`gsk_...`, `sk-...`), bearer tokens, and connection passwords.
+
+---
+
+### Local Development & Docker Commands
+
+#### 1. Running with Docker Compose (Production Shape)
+```bash
+# Start all services (db, redis, api, worker)
+docker compose up -d
+
+# Check service health states
+docker compose ps
+
+# View API logs with live streaming
+docker compose logs -f api
+
+# Stop all services (data survives in named volumes)
+docker compose down
+
+# Stop and wipe all database and cache volumes
+docker compose down -v
+```
+
+#### 2. Running Locally (Native Python Virtualenv)
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Run database migrations
+python -m alembic upgrade head
+
+# 3. Start Celery background worker
+python -m celery -A app.worker.celery_app worker --loglevel=info --pool=solo
+
+# 4. Start FastAPI development server
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+#### 3. Running Automated Tests & Lint Verification
+```bash
+# Run the entire test suite hermetically (no external API keys required)
+python -m pytest tests/ -v
+
+# Run Python compilation / syntax check
+python -m compileall app alembic tests
+```
+
+---
+
+### Environment Variables & Production Configuration
+
+Configure in `.env` (git-ignored) or inject via container orchestrator:
+
+| Variable | Default (Dev) | Description |
+|----------|---------------|-------------|
+| `ENVIRONMENT` | `development` | Runtime mode: `development`, `testing`, `staging`, or `production`. |
+| `DATABASE_URL` | `postgresql+psycopg://tracemind:tracemind@localhost:5432/tracemind` | Primary PostgreSQL database connection string. |
+| `TRACEMIND_API_KEY` | *(required in prod)* | Master API key. In production, must be at least 16 chars and non-placeholder. |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker URL for task dispatching. |
+| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/1` | Redis result backend for task status. |
+| `CELERY_TASK_ALWAYS_EAGER` | `False` | Must be `False` in production (enforced by configuration validation). |
+| `LOG_LEVEL` | `INFO` | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+| `LOG_FORMAT` | `json` | Log formatting: `json` for production, `text` for local console. |
+| `LLM_PROVIDER` | `mock` | AI engine: `mock` (zero-cost offline), `groq` (free high-speed), or `openai`. |
+| `GROQ_API_KEY` | `""` | Groq API Key (get free at [console.groq.com/keys](https://console.groq.com/keys)). |
+| `EMBEDDING_PROVIDER` | `mock` | Embedding engine: `mock` (offline 384-d) or `http` (OpenAI-compatible). |
+
+---
+
+### Continuous Integration (CI) Workflow
+
+GitHub Actions workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executes automatically on push and pull requests:
+1. Sets up Python 3.12 and installs dependencies from `requirements.txt`.
+2. Spins up containerized services: PostgreSQL 16 with `pgvector` and Redis 7.
+3. Performs syntax and compilation validation (`python -m compileall`).
+4. Executes database migrations (`python -m alembic upgrade head`).
+5. Executes the complete test suite (`python -m pytest tests/ -v`) using mock providers.
+6. Builds the production Docker image with Docker Buildx.
+
+---
+
+### Production Deployment Checklist
+
+- [ ] Set `ENVIRONMENT=production` in the production environment.
+- [ ] Generate and set a high-entropy `TRACEMIND_API_KEY` (minimum 32 random alphanumeric characters).
+- [ ] Ensure `CELERY_TASK_ALWAYS_EAGER=False` so tasks process asynchronously.
+- [ ] Configure PostgreSQL with `pgvector/pgvector:pg16` and apply migrations: `python -m alembic upgrade head`.
+- [ ] Point Kubernetes / ECS container liveness probe to `GET /health` (initialDelay: 10s, period: 15s).
+- [ ] Point container readiness probe to `GET /ready` (initialDelay: 10s, period: 10s).
+- [ ] Set `LOG_FORMAT=json` for unified log ingestion into Datadog, CloudWatch, or GCP Cloud Logging.
+- [ ] Verify Redis and PostgreSQL ports are not exposed to the public internet (use VPC / private subnet).
+
+---
+
+### Milestone 11: End-to-End Testing & Failure Recovery
+
+TraceMind AI features a comprehensive, multi-tiered test suite covering unit validation, API integration, full end-to-end event-to-investigation workflows, failure injection, and concurrency safety.
+
+#### 1. Test Suite Architecture
+
+| Test Suite | File | Marker | Scope & Capabilities |
+|------------|------|--------|----------------------|
+| **Unit Suite** | `tests/test_unit_suite.py` | `unit` | In-memory unit tests: timezone checks, fingerprint masking, report schema validation, strict citation verification, RAG chunking, secret redaction. |
+| **End-to-End Workflow** | `tests/test_e2e_workflow.py` | `e2e` | Full lifecycle: runbook ingestion -> event submission -> DB persistence -> incident correlation -> Celery worker investigation -> RAG retrieval -> report persistence & retrieval. |
+| **Failure & Recovery** | `tests/test_failure_recovery.py` | `integration` | Redis unavailable during enqueue (HTTP 503 + job marked FAILED), worker retry with exponential backoff, AI provider timeout/errors, malformed JSON, and idempotency guards. |
+| **Concurrency & Consistency** | `tests/test_concurrency_consistency.py` | `integration`, `slow` | Multi-threaded concurrent event ingestion, race condition handling, atomic rollbacks, and dual-write analysis. |
+| **Production Readiness & Probes** | `tests/test_readiness.py`, `tests/test_logging.py` | `integration` | Liveness (`/health`), DB readiness (`/health/db`), full readiness (`/ready`), request correlation (`X-Request-ID`), secret redaction filter. |
+
+#### 2. Running Automated Tests
+
+```bash
+# 1. Run ultra-fast unit tests only (sub-second execution, zero external I/O)
+python -m pytest tests/ -m unit -v
+
+# 2. Run end-to-end workflow integration tests
+python -m pytest tests/ -m e2e -v
+
+# 3. Run failure injection and recovery scenarios
+python -m pytest tests/test_failure_recovery.py -v
+
+# 4. Run concurrency and consistency tests
+python -m pytest tests/test_concurrency_consistency.py -v
+
+# 5. Run the entire comprehensive test suite (all milestones)
+python -m pytest tests/ -v
+```
+
+#### 3. Concurrency & Race Condition Analysis
+
+##### Known Architectural Gap: The Dual-Write Problem
+In both `POST /api/v1/events` and `POST /api/v1/incidents/{id}/investigate`:
+1. The record (`Event`, `ProcessingJob`, or `InvestigationJob`) is safely committed to PostgreSQL.
+2. The Celery task is dispatched to the Redis broker via `.delay()`.
+
+**The Failure Mode:**
+If the application container terminates abruptly (OOM killer, SIGKILL, network partition) between Step 1 and Step 2, the job record persists in PostgreSQL with status `PENDING`, but is never queued in Redis.
+
+**Architectural Solutions & Recommendations:**
+1. **Transactional Outbox Pattern**: Store task intents in an `outbox` table within the same database transaction. A separate relay process (or PostgreSQL `LISTEN`/`NOTIFY`) reads the outbox and publishes to Redis.
+2. **Reconciliation Sweeper**: A periodic Celery Beat job querying:
+   ```sql
+   SELECT id FROM processing_jobs 
+   WHERE status = 'PENDING' AND created_at < NOW() - INTERVAL '5 minutes';
+   ```
+   and automatically dispatching un-queued jobs.
+
+#### 4. Manual Smoke Test Procedure
+
+Execute this 5-step smoke test against a running local or containerized deployment:
+
+```bash
+# Set base URL and API key
+API_URL="http://localhost:8000"
+API_KEY="test-secret-key-12345"
+
+# 1. Verify service health and readiness
+curl -s -X GET "$API_URL/health"
+curl -s -X GET "$API_URL/ready"
+
+# 2. Ingest an operational runbook
+curl -s -X POST "$API_URL/api/v1/runbooks" \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Auth Database Saturation Runbook",
+    "service_name": "auth-service",
+    "content": "When auth-service experiences connection timeouts, inspect PostgreSQL max_connections and active sessions.",
+    "tags": ["auth", "database"]
+  }'
+
+# 3. Submit an error event
+EVENT_RESP=$(curl -s -X POST "$API_URL/api/v1/events" \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service_name": "auth-service",
+    "environment": "production",
+    "level": "ERROR",
+    "message": "ConnectionRefusedError: Unable to connect to postgres-auth at 10.0.1.25:5432",
+    "timestamp": "2026-10-21T10:00:00Z"
+  }')
+echo "Event response: $EVENT_RESP"
+
+# 4. Fetch the created incident
+INCIDENTS=$(curl -s -X GET "$API_URL/api/v1/incidents?service_name=auth-service" \
+  -H "X-API-Key: $API_KEY")
+INCIDENT_ID=$(echo $INCIDENTS | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+echo "Incident ID: $INCIDENT_ID"
+
+# 5. Trigger an AI investigation and retrieve the structured report
+INV_RESP=$(curl -s -X POST "$API_URL/api/v1/incidents/$INCIDENT_ID/investigate" \
+  -H "X-API-Key: $API_KEY")
+JOB_ID=$(echo $INV_RESP | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+echo "Investigation Job ID: $JOB_ID"
+
+# Poll investigation status (or fetch immediately if Celery is eager)
+curl -s -X GET "$API_URL/api/v1/investigations/$JOB_ID" \
+  -H "X-API-Key: $API_KEY"
+```
+
+---
+
+### Zero-Budget Demo Deployment (Render + Neon Free Tier)
+
+TraceMind AI includes a dedicated zero-cost demo deployment architecture designed for free-tier cloud hosting ($0.00/month) without sacrificing clean separation of concerns or security.
+
+#### 1. Zero-Cost Service Architecture
+
+```
+┌────────────────────────────────┐         ┌────────────────────────────────┐
+│   Vercel Free Static Hosting   │         │    Render Free Web Service     │
+│   (Optional React/Vite UI)     │ ──────> │    FastAPI Application         │
+│   CORS protected via ORIGIN    │         │    DEMO_MODE=True              │
+└────────────────────────────────┘         │    FastAPI BackgroundTasks     │
+                                           └────────────────┬───────────────┘
+                                                            │
+                                                            │ SSL (Encrypted)
+                                                            ▼
+                                           ┌────────────────────────────────┐
+                                           │    Neon Serverless Postgres    │
+                                           │    Free Tier (0.5 GB)          │
+                                           │    pgvector extension enabled  │
+                                           └────────────────────────────────┘
+```
+
+| Component | Target Free Provider | Free Tier Specification | Cost |
+|-----------|----------------------|-------------------------|------|
+| **API & Background Runner** | [Render](https://render.com) | Free Web Service (512 MB RAM, 0.1 CPU, shared compute) | **$0.00** |
+| **Persistent Relational DB & Vectors** | [Neon](https://neon.tech) | Free Tier (0.5 GB storage, serverless compute, `pgvector`) | **$0.00** |
+| **LLM Inference** | [Groq](https://groq.com) or `mock` | Free Developer Tier (`llama-3.3-70b-versatile`) or Offline Mock | **$0.00** |
+| **Static Web UI** | [Vercel](https://vercel.com) | Free Hobby Tier (if frontend deployed) | **$0.00** |
+
+---
+
+#### 2. Demo Mode vs. Production Mode
+
+TraceMind AI provides a clean mode separation via the `DEMO_MODE` environment variable:
+
+- **Standard Production Mode (`DEMO_MODE=False`):**
+  - Uses separate Celery worker processes and a dedicated Redis broker.
+  - Recommended for Kubernetes, AWS ECS, or multi-container enterprise deployments with sustained high-throughput event streams.
+- **Zero-Budget Demo Mode (`DEMO_MODE=True`):**
+  - Runs on a **single free Render Web Service container** without requiring a separate paid worker or Redis instance.
+  - Event processing and AI investigations execute asynchronously in-process via FastAPI's `BackgroundTasks`.
+  - HTTP requests return immediately (HTTP 202 Accepted) without blocking the client.
+  - Job status (`PENDING -> PROCESSING -> COMPLETED / FAILED`), error messages, and full investigation reports are persisted in Neon PostgreSQL.
+  - Production security rules remain active: strong API keys are still enforced, secret redaction is active, and credentials cannot leak in logs.
+
+---
+
+#### 3. Free-Tier Operational Realities & Limitations
+
+1. **Render Idle Spin-Down:**
+   - Free Render Web Services automatically spin down after **15 minutes of inactivity**.
+   - The first HTTP request after spin-down experiences a **50–60 second cold-start delay** while Render provisions the container.
+   - *Caution:* If Render spins down while an in-process background job is actively computing, the task may be aborted.
+2. **Neon Serverless Compute Suspend:**
+   - Neon serverless compute nodes suspend after **5 minutes of inactivity**.
+   - When a new query arrives, Neon automatically wakes up within 500–1000ms.
+   - TraceMind AI uses SQLAlchemy's `pool_pre_ping=True` and `pool_recycle=300` to automatically test and recycle idle connections upon Neon wake-up.
+3. **Compute & Memory Boundaries:**
+   - Render free tier provides 512 MB RAM. Avoid concurrent heavy memory loads.
+   - Use `LOG_FORMAT=json` for memory-efficient structured log formatting.
+
+---
+
+#### 4. Step-by-Step Deployment Instructions
+
+##### Step A: Provision Free Database on Neon
+1. Navigate to [console.neon.tech](https://console.neon.tech) and sign up with GitHub or Google (no credit card required).
+2. Click **Create Project** and name it `tracemind-db`.
+3. In the **Connection Details** modal, copy the connection string. It will look like:
+   ```text
+   postgresql://tracemind_owner:AbC123dEf@ep-cool-fog-123456.us-east-2.aws.neon.tech/neondb?sslmode=require
+   ```
+   *(Note: TraceMind AI automatically adapts `postgres://` or `postgresql://` to `postgresql+psycopg://` with SSL support).*
+
+##### Step B: Deploy FastAPI Application on Render
+1. Navigate to [dashboard.render.com](https://dashboard.render.com) and log in.
+2. Click **New +** > **Web Service**.
+3. Connect your GitHub repository (`tracemind-ai`).
+4. Configure the service settings:
+   - **Name:** `tracemind-ai`
+   - **Region:** `Oregon (US West)` (or closest to your Neon region)
+   - **Runtime:** `Python`
+   - **Branch:** `main` (or `master`)
+   - **Plan:** `Free`
+   - **Build Command:**
+     ```bash
+     pip install -r requirements.txt && python -m alembic upgrade head
+     ```
+   - **Start Command:**
+     ```bash
+     uvicorn app.main:app --host 0.0.0.0 --port $PORT
+     ```
+   - **Health Check Path:** `/health`
+5. Under **Environment Variables**, add:
+   | Key | Value | Description |
+   |-----|-------|-------------|
+   | `ENVIRONMENT` | `production` | Enables production security checks |
+   | `DEMO_MODE` | `true` | Enables in-process background execution without Redis |
+   | `DATABASE_URL` | *(paste your Neon connection string)* | Neon PostgreSQL connection |
+   | `TRACEMIND_API_KEY` | *(generate a 32+ character random key)* | API authentication key |
+   | `LLM_PROVIDER` | `mock` *(or `groq`)* | AI engine |
+   | `GROQ_API_KEY` | *(optional, free key from console.groq.com)* | Only if `LLM_PROVIDER=groq` |
+   | `EMBEDDING_PROVIDER` | `mock` | Deterministic offline embeddings |
+   | `LOG_FORMAT` | `json` | Production structured logging |
+   | `CORS_ORIGINS` | `*` *(or your frontend URL)* | Cross-Origin access |
+6. Click **Deploy Web Service**. Render will install dependencies, apply Alembic migrations against Neon, and launch FastAPI.
+
+---
+
+#### 5. Safe Migration & Rollback Guidelines
+
+- **Applying Migrations:**
+  Migrations execute automatically during the build step via `python -m alembic upgrade head`.
+  To run migrations manually from your local terminal against Neon:
+  ```powershell
+  $env:DATABASE_URL="postgresql://user:pass@ep-xyz.aws.neon.tech/neondb?sslmode=require"
+  python -m alembic upgrade head
+  ```
+- **Rollback Caution:**
+  Never run `Base.metadata.drop_all()` or drop schemas against Neon.
+  To revert the most recent migration cleanly:
+  ```powershell
+  python -m alembic downgrade -1
+  ```
+- **Neon Branching Backup:**
+  Neon supports zero-copy branching. Before running major schema alterations, create a free database branch in the Neon dashboard as an instantaneous snapshot backup.
 
 ---
 
@@ -554,5 +936,10 @@ Only runtime-volatile tokens are masked; semantic error identifiers and codes ar
 - Milestone 6: Asynchronous Background Processing with Celery & Redis (Completed)
 - Milestone 7: Deterministic Incident Grouping & Event Correlation (Completed)
 - Milestone 8: AI-Assisted Incident Investigation Engine (Completed)
-- Milestone 9: Cloud Deployment & Monitoring (GCP / AWS)
+- Milestone 9: Runbook Ingestion, Embeddings, Vector Retrieval & RAG (Completed)
+- Milestone 10: Production Readiness & Containerized Operations (Completed)
+- Milestone 11: End-to-End Testing & Failure Recovery (Completed)
+- Zero-Budget Deployment Mode (Completed)
+
+
 

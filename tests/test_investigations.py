@@ -474,3 +474,30 @@ class TestInvestigationAPI:
     def test_post_investigation_malformed_uuid_returns_422(self, client: TestClient) -> None:
         resp = client.post("/api/v1/incidents/not-a-valid-uuid/investigate")
         assert resp.status_code == 422
+
+
+class TestLLMProviderFactory:
+    """Verifies provider resolution and Groq configuration defaults."""
+
+    def test_groq_provider_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.llm.factory import get_llm_provider
+        from app.services.llm.http_provider import HTTPLLMProvider
+
+        monkeypatch.setenv("LLM_PROVIDER", "groq")
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test_groq_key_999")
+        monkeypatch.delenv("LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("LLM_MODEL", raising=False)
+
+        provider = get_llm_provider()
+        assert isinstance(provider, HTTPLLMProvider)
+        assert provider.api_key == "gsk_test_groq_key_999"
+        assert provider.base_url == "https://api.groq.com/openai/v1"
+        assert provider.model == "llama-3.3-70b-versatile"
+
+    def test_mock_provider_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.llm.factory import get_llm_provider
+        from app.services.llm.mock_provider import MockLLMProvider
+
+        monkeypatch.setenv("LLM_PROVIDER", "mock")
+        provider = get_llm_provider()
+        assert isinstance(provider, MockLLMProvider)

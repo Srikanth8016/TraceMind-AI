@@ -59,6 +59,10 @@ class RootCauseHypothesis(BaseModel):
     )
 
 
+# Backward-compatible alias
+Hypothesis = RootCauseHypothesis
+
+
 class RecommendedAction(BaseModel):
     """
     Recommended diagnostic or verification step for on-call engineers.
@@ -82,6 +86,18 @@ class RecommendedAction(BaseModel):
     )
 
 
+class RetrievedRunbookRef(BaseModel):
+    """
+    Retrieved operational runbook passage supplied to the LLM as background reference.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    chunk_id: str = Field(..., description="Stable chunk identifier (e.g. 'doc:<uuid>:chunk:<idx>').")
+    document_title: str = Field(..., description="Title of the source runbook.")
+    similarity_score: float = Field(..., description="Cosine similarity score against incident query.")
+    snippet: str = Field(..., description="Bounded text excerpt from the runbook passage.")
+
+
 class InvestigationReport(BaseModel):
     """
     Complete structured investigation report produced by the AI investigation engine.
@@ -100,6 +116,10 @@ class InvestigationReport(BaseModel):
     recommended_actions: list[RecommendedAction] = Field(
         default_factory=list,
         description="Prioritized debugging steps for engineers.",
+    )
+    retrieved_runbooks: list[RetrievedRunbookRef] = Field(
+        default_factory=list,
+        description="Retrieved runbook passages provided as passive background reference (not active incident telemetry).",
     )
     missing_evidence: list[str] = Field(
         default_factory=list,

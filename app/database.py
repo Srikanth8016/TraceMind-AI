@@ -28,24 +28,31 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 load_dotenv()
 
 
-# ---------------------------------------------------------------------------
-# Engine
-# ---------------------------------------------------------------------------
+from app.config import get_settings
 
-DATABASE_URL: str = os.environ["DATABASE_URL"]
-# ``DATABASE_URL`` must be present.  If it is missing we raise ``KeyError``
-# immediately at import time — fast fail is better than a cryptic error later.
+settings = get_settings()
 
-engine = create_engine(
-    DATABASE_URL,
-    # pool_pre_ping sends a cheap "SELECT 1" before handing out a connection.
-    # This transparently recovers from connections that went stale while the
-    # pool was idle (e.g. after a PostgreSQL restart).
-    pool_pre_ping=True,
-    # echo=True would log every SQL statement — useful for debugging, noisy in
-    # production.  Leave False; enable per-session or via logging config if needed.
-    echo=False,
-)
+DATABASE_URL: str = settings.DATABASE_URL
+# Normalize postgres:// and postgresql:// to postgresql+psycopg:// for psycopg 3
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
+engine_kwargs = {
+    "pool_pre_ping": True,
+    "echo": False,
+}
+# Only apply pool sizing for pool-enabled dialects (PostgreSQL, MySQL)
+if not DATABASE_URL.startswith("sqlite"):
+    engine_kwargs.update({
+        "pool_size": settings.DB_POOL_SIZE,
+        "max_overflow": settings.DB_MAX_OVERFLOW,
+        "pool_timeout": settings.DB_POOL_TIMEOUT,
+        "pool_recycle": settings.DB_POOL_RECYCLE,
+    })
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 
 
 # ---------------------------------------------------------------------------

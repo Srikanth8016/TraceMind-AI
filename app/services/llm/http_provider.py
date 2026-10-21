@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class HTTPLLMProvider(BaseLLMProvider):
     """
-    Standard HTTP provider compatible with OpenAI, Azure OpenAI, vLLM, Ollama, and Gemini.
+    Standard HTTP provider compatible with Groq, OpenAI, Azure OpenAI, vLLM, and Ollama.
     """
 
     def __init__(
@@ -26,13 +26,23 @@ class HTTPLLMProvider(BaseLLMProvider):
         model: str | None = None,
         timeout: float = 30.0,
     ):
-        self.api_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+        is_groq = os.getenv("LLM_PROVIDER", "").lower().strip() == "groq" or bool(os.getenv("GROQ_API_KEY"))
+        default_base_url = "https://api.groq.com/openai/v1" if is_groq else "https://api.openai.com/v1"
+        default_model = "llama-3.3-70b-versatile" if is_groq else "gpt-4o-mini"
+
+        self.api_key = (
+            api_key
+            or os.getenv("GROQ_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        )
         self.base_url = (
             base_url
             or os.getenv("LLM_BASE_URL")
-            or "https://api.openai.com/v1"
+            or default_base_url
         ).rstrip("/")
-        self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
+        self.model = model or os.getenv("LLM_MODEL") or default_model
         self.timeout = timeout
 
         if not self.api_key and "localhost" not in self.base_url and "127.0.0.1" not in self.base_url:

@@ -17,27 +17,18 @@ Design Decisions
    - JSON serialization is strictly enforced.
 """
 
+import logging
 import os
 from celery import Celery
-from dotenv import load_dotenv
+import redis
+from app.config import get_settings
 
-load_dotenv()
+logger = logging.getLogger(__name__)
+settings = get_settings()
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-CELERY_BROKER_URL: str = os.environ.get(
-    "CELERY_BROKER_URL", "redis://localhost:6379/0"
-)
-
-CELERY_RESULT_BACKEND: str = os.environ.get(
-    "CELERY_RESULT_BACKEND", "redis://localhost:6379/1"
-)
-
-CELERY_TASK_ALWAYS_EAGER: bool = os.environ.get(
-    "CELERY_TASK_ALWAYS_EAGER", "False"
-).lower() in ("true", "1", "yes")
+CELERY_BROKER_URL: str = settings.CELERY_BROKER_URL
+CELERY_RESULT_BACKEND: str = settings.CELERY_RESULT_BACKEND
+CELERY_TASK_ALWAYS_EAGER: bool = settings.CELERY_TASK_ALWAYS_EAGER
 
 # ---------------------------------------------------------------------------
 # Celery Application
@@ -60,4 +51,24 @@ celery_app.conf.update(
     enable_utc=True,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
+    worker_prefetch_multiplier=1,
+    task_time_limit=300,
+    task_soft_time_limit=240,
+    broker_connection_retry_on_startup=True,
 )
+
+
+def check_redis_connection(timeout: float = 2.0) -> bool:
+    """
+    Verify Redis broker connectivity for readiness probes.
+    Returns True if healthy, False if unreachable or errored.
+    """
+    # If in eager test mode without Redis configured, consider ready
+    if CELERY_TASK_ALWAYS_EAGER and not os.environ.get("CELERY_BROKER_URL"):
+        return True
+    try:
+        r = redis.Redis.from_url(CELERY_BROKER_URL, socket_timeout=timeout, socket_connect_timeout=timeout)
+        return bool(r.ping())
+    except Exception as exc:
+        logger.warning("Redis readiness probe failed: %s", exc)
+        return False

@@ -28,7 +28,7 @@ def get_llm_provider() -> BaseLLMProvider:
         return _global_override_provider
 
     provider_name = os.getenv("LLM_PROVIDER", "mock").lower().strip()
-    if provider_name in ("http", "openai", "azure", "vllm"):
+    if provider_name in ("groq", "http", "openai", "azure", "vllm"):
         return HTTPLLMProvider()
 
     # Default to mock provider for local development and tests without API keys

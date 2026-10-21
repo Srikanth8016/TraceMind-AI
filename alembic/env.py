@@ -33,6 +33,10 @@ config = context.config
 # placeholder in alembic.ini.  This way alembic.ini never contains secrets.
 database_url = os.environ.get("DATABASE_URL")
 if database_url:
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
     config.set_main_option("sqlalchemy.url", database_url)
 
 # Interpret the config file for Python logging if it has a [loggers] section.

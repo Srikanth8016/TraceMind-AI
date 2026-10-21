@@ -99,6 +99,9 @@ app.dependency_overrides[get_db] = override_get_db
 TEST_API_KEY = "test-secret-key-12345"
 import os
 os.environ["TRACEMIND_API_KEY"] = TEST_API_KEY
+os.environ["LLM_PROVIDER"] = "mock"
+os.environ["EMBEDDING_PROVIDER"] = "mock"
+os.environ["ENVIRONMENT"] = "testing"
 
 # ---------------------------------------------------------------------------
 # Celery eager mode & SessionLocal binding for worker tasks (Milestone 6)

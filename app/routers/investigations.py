@@ -7,7 +7,7 @@ Milestone 8: Asynchronous AI-assisted incident investigation engine.
 from typing import Annotated
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,7 @@ from app.schemas.investigation import (
     InvestigationCreateResponse,
     InvestigationJobResponse,
 )
+from app.services.task_dispatcher import dispatch_incident_investigation
 from app.tasks import investigate_incident_task
 from app.utils import sanitize_error
 
@@ -31,7 +32,7 @@ router = APIRouter(tags=["investigations"])
     summary="Enqueue AI investigation for an incident",
     description=(
         "Initiate an asynchronous AI-assisted investigation for an incident. "
-        "Persists an InvestigationJob record and enqueues background analysis via Celery. "
+        "Persists an InvestigationJob record and enqueues background analysis via Celery or BackgroundTasks in demo mode. "
         "Returns HTTP 202 with the investigation job ID."
     ),
 )
@@ -44,6 +45,7 @@ router = APIRouter(tags=["investigations"])
 )
 def request_incident_investigation(
     incident_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> InvestigationCreateResponse:
     """
@@ -68,9 +70,9 @@ def request_incident_investigation(
     db.commit()
     db.refresh(job)
 
-    # 3. Enqueue Celery task with explicit broker failure handling
+    # 3. Enqueue task via Celery (production) or BackgroundTasks (demo mode)
     try:
-        investigate_incident_task.delay(str(job.id), str(incident.id))
+        dispatch_incident_investigation(str(job.id), str(incident.id), background_tasks)
     except Exception as exc:
         job.status = InvestigationStatus.FAILED.value
         job.error_message = f"Failed to enqueue task to broker: {sanitize_error(str(exc))}"
