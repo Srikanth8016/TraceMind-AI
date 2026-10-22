@@ -27,6 +27,7 @@ from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.models.event import Event
 from app.models.incident import Incident
+from app.models.integration import NotificationLog
 from app.models.investigation import InvestigationJob, InvestigationStatus
 from app.models.job import JobStatus, ProcessingJob
 from app.services.correlation import correlate_event_to_incident
@@ -204,6 +205,20 @@ def investigate_incident_task(self, job_id: str, incident_id: str) -> dict:
         job.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+        try:
+            from app.services.integrations.notifications import dispatch_incident_notification
+            dispatch_incident_notification(
+                session,
+                incident,
+                "investigation.completed",
+                extra_context={
+                    "job_id": str(job.id),
+                    "summary": f"{len(report.hypotheses)} root-cause hypotheses evaluated.",
+                },
+            )
+        except Exception as notify_exc:
+            logger.warning("Failed to dispatch investigation completed notification: %s", notify_exc)
+
         logger.info(
             "InvestigationJob %s completed successfully for incident %s (hypotheses=%d)",
             job.id,
@@ -237,6 +252,22 @@ def investigate_incident_task(self, job_id: str, incident_id: str) -> dict:
                     job.error_message = f"Max retries exceeded ({self.max_retries} attempts): {sanitized_msg}"
                     job.updated_at = datetime.now(timezone.utc)
                     session.commit()
+
+                    try:
+                        target_inc = session.get(Incident, uuid.UUID(incident_id))
+                        if target_inc:
+                            from app.services.integrations.notifications import dispatch_incident_notification
+                            dispatch_incident_notification(
+                                session,
+                                target_inc,
+                                "investigation.failed",
+                                extra_context={
+                                    "job_id": str(job.id),
+                                    "summary": job.error_message,
+                                },
+                            )
+                    except Exception as notify_exc:
+                        logger.warning("Failed to dispatch investigation failure notification: %s", notify_exc)
         except Exception as update_exc:
             logger.error("Failed to update investigation job status on error: %s", update_exc)
 
@@ -244,4 +275,87 @@ def investigate_incident_task(self, job_id: str, incident_id: str) -> dict:
 
     finally:
         session.close()
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=5,
+    acks_late=True,
+)
+def send_slack_notification_task(
+    self,
+    notification_log_id: str,
+    payload_json: str,
+) -> dict:
+    """
+    Background worker task: delivers outbound notification to Slack incoming webhook.
+    Enforces at-most-once delivery via NotificationLog idempotency check.
+    """
+    import json
+    from app.config import get_settings
+    from app.services.integrations.slack import execute_slack_delivery, mask_slack_url
+
+    session = SessionLocal()
+    settings = get_settings()
+    try:
+        parsed_id = uuid.UUID(notification_log_id)
+        record = session.get(NotificationLog, parsed_id)
+        if not record:
+            logger.warning("NotificationLog %s not found. Skipping.", notification_log_id)
+            return {"status": "failed", "reason": "not_found"}
+
+        # Idempotency guard: if already sent, exit early
+        if record.status == "SENT":
+            logger.info("Notification %s already marked SENT. Skipping duplicate execution.", notification_log_id)
+            return {"status": "already_sent"}
+
+        if not settings.SLACK_NOTIFICATIONS_ENABLED or not settings.SLACK_WEBHOOK_URL:
+            record.status = "SKIPPED"
+            record.error_message = "Slack notifications disabled or webhook URL not configured."
+            session.commit()
+            return {"status": "skipped"}
+
+        payload = json.loads(payload_json)
+        masked_url = mask_slack_url(settings.SLACK_WEBHOOK_URL)
+        logger.info("Delivering Slack notification %s to %s", notification_log_id, masked_url)
+
+        execute_slack_delivery(
+            webhook_url=settings.SLACK_WEBHOOK_URL,
+            payload=payload,
+            timeout_seconds=settings.REQUEST_TIMEOUT_SECONDS,
+        )
+
+        record.status = "SENT"
+        record.sent_at = datetime.now(timezone.utc)
+        record.error_message = None
+        session.commit()
+        return {"status": "sent", "notification_id": notification_log_id}
+
+    except Exception as exc:
+        logger.exception("Failed to deliver Slack notification %s: %s", notification_log_id, exc)
+        session.rollback()
+
+        try:
+            record = session.get(NotificationLog, uuid.UUID(notification_log_id))
+            if record:
+                sanitized_msg = sanitize_error(str(exc))
+                if self.request.retries < self.max_retries:
+                    countdown = min(2 ** (self.request.retries + 1), 60)
+                    record.status = "PENDING"
+                    record.error_message = f"Transient failure (attempt {self.request.retries + 1}): {sanitized_msg}"
+                    session.commit()
+                    raise self.retry(exc=exc, countdown=countdown)
+                else:
+                    record.status = "FAILED"
+                    record.error_message = f"Max retries exceeded: {sanitized_msg}"
+                    session.commit()
+        except Exception as update_exc:
+            logger.error("Failed to update notification log status: %s", update_exc)
+
+        raise exc
+
+    finally:
+        session.close()
+
 

@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { X, Plus, AlertOctagon } from 'lucide-react';
+import { AlertOctagon, X, Plus } from 'lucide-react';
 import { IncidentCreatePayload, IncidentSeverity } from '../../types/incident';
 import { createIncident } from '../../api/incidents';
+import { listWorkspaces } from '../../api/workspaces';
+import { Workspace } from '../../types/workspace';
 import { getErrorMessage } from '../../api/client';
 
 interface CreateIncidentModalProps {
@@ -21,9 +23,19 @@ export const CreateIncidentModal: React.FC<CreateIncidentModalProps> = ({
     service_name: 'api-service',
     environment: 'production',
     severity: 'ERROR',
+    workspace_id: null,
   });
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (isOpen) {
+      listWorkspaces()
+        .then((res) => setWorkspaces(res.items))
+        .catch(() => {});
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -130,6 +142,29 @@ export const CreateIncidentModal: React.FC<CreateIncidentModalProps> = ({
               <option value="ERROR">ERROR</option>
               <option value="WARNING">WARNING</option>
               <option value="INFO">INFO</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-mono font-medium text-slate-300 mb-1">
+              Target Team Workspace (Optional)
+            </label>
+            <select
+              value={formData.workspace_id || ''}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  workspace_id: e.target.value ? e.target.value : null,
+                })
+              }
+              className="w-full px-3 py-2 text-sm bg-sre-900 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500 font-mono"
+            >
+              <option value="">Personal / Unassigned</option>
+              {workspaces.map((ws) => (
+                <option key={ws.id} value={ws.id}>
+                  {ws.name} ({ws.current_user_role?.toUpperCase() || 'MEMBER'})
+                </option>
+              ))}
             </select>
           </div>
 

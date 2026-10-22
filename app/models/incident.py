@@ -166,6 +166,14 @@ class Incident(Base):
         index=True,
     )
 
+    # Foreign key to team workspace (Milestone 17, nullable for legacy/personal incidents)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     # 1-to-many relationship: an incident has many events
     events = relationship("Event", back_populates="incident", lazy="select")
 
@@ -174,6 +182,9 @@ class Incident(Base):
 
     # User relationship
     owner = relationship("User", back_populates="incidents", lazy="select")
+
+    # Workspace relationship
+    workspace = relationship("Workspace", back_populates="incidents", lazy="select")
 
     def __repr__(self) -> str:
         return (

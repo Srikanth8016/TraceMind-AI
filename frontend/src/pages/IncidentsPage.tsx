@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { getIncidents } from '../api/incidents';
-import { Incident, IncidentFilterParams } from '../../types/incident';
+import { Incident, IncidentFilterParams } from '../types/incident';
 import { getErrorMessage } from '../api/client';
 import { StatCard } from '../components/common/StatCard';
 import { IncidentFilters } from '../components/incidents/IncidentFilters';

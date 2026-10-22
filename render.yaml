@@ -22,6 +22,8 @@ services:
         sync: false
       - key: TRACEMIND_API_KEY
         generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
       - key: LLM_PROVIDER
         value: mock
       - key: GROQ_API_KEY
@@ -34,3 +36,11 @@ services:
         value: INFO
       - key: CORS_ORIGINS
         value: "*"
+      - key: DATADOG_WEBHOOK_SECRET
+        sync: false
+      - key: PAGERDUTY_WEBHOOK_SECRET
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: SLACK_NOTIFICATIONS_ENABLED
+        value: "false"

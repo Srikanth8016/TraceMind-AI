@@ -5,12 +5,14 @@ interface ErrorAlertProps {
   title?: string;
   message: string;
   onRetry?: () => void;
+  onDismiss?: () => void;
 }
 
 export const ErrorAlert: React.FC<ErrorAlertProps> = ({
   title = 'Operation Error',
   message,
   onRetry,
+  onDismiss,
 }) => {
   return (
     <div className="rounded-lg border border-red-900/60 bg-red-950/30 p-4 text-red-200">
@@ -27,6 +29,15 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
           >
             <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
             Retry
+          </button>
+        )}
+        {onDismiss && (
+          <button
+            onClick={onDismiss}
+            className="ml-3 text-red-400 hover:text-red-200 text-xs font-medium"
+            aria-label="Dismiss error"
+          >
+            ✕
           </button>
         )}
       </div>

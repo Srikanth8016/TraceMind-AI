@@ -59,6 +59,9 @@ REDACTION_PATTERNS = [
     (re.compile(r'(["\']?password["\']?\s*[:=]\s*["\'])([^"\']*)(["\'])', re.IGNORECASE), r"\1[REDACTED]\3"),
     (re.compile(r'(["\']?hashed_password["\']?\s*[:=]\s*["\'])([^"\']*)(["\'])', re.IGNORECASE), r"\1[REDACTED]\3"),
     (re.compile(r"password=([^\s&]+)", re.IGNORECASE), "password=[REDACTED]"),
+    (re.compile(r"https://hooks\.slack\.com/services/[a-zA-Z0-9_\-\.\/]+", re.IGNORECASE), "[REDACTED_SLACK_WEBHOOK]"),
+    (re.compile(r"(X-PagerDuty-Signature:\s*)[^\s,]+", re.IGNORECASE), r"\1[REDACTED_SIGNATURE]"),
+    (re.compile(r"(DD-WEBHOOK-TOKEN:\s*)[^\s,]+", re.IGNORECASE), r"\1[REDACTED_TOKEN]"),
 ]
 
 

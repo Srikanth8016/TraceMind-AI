@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { listRunbooks, uploadRunbookFile, searchKnowledge } from '../api/knowledge';
-import { KnowledgeDocument, RetrievedChunk } from '../../types/knowledge';
+import { KnowledgeDocument, RetrievedChunk } from '../types/knowledge';
 import { getErrorMessage } from '../api/client';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { ErrorAlert } from '../components/common/ErrorAlert';

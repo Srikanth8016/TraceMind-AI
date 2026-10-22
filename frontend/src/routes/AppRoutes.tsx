@@ -9,6 +9,7 @@ import { IncidentDetailPage } from '../pages/IncidentDetailPage';
 import { EventsPage } from '../pages/EventsPage';
 import { KnowledgePage } from '../pages/KnowledgePage';
 import { OperationsPage } from '../pages/OperationsPage';
+import { WorkspacesPage } from '../pages/WorkspacesPage';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 
 const ProtectedRoute: React.FC<{ children: React.ReactElement }> = ({ children }) => {
@@ -50,6 +51,7 @@ export const AppRoutes: React.FC = () => {
         <Route path="incidents/:id" element={<IncidentDetailPage />} />
         <Route path="events" element={<EventsPage />} />
         <Route path="knowledge" element={<KnowledgePage />} />
+        <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="operations" element={<OperationsPage />} />
       </Route>
 

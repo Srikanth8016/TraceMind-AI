@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { getEvents, ingestEvent } from '../api/events';
-import { TelemetryEvent, EventFilterParams, EventCreatePayload } from '../../types/event';
+import { TelemetryEvent, EventFilterParams, EventCreatePayload } from '../types/event';
 import { getErrorMessage } from '../api/client';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { ErrorAlert } from '../components/common/ErrorAlert';

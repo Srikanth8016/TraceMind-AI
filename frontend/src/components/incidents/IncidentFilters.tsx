@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Search, Filter, ArrowUpDown } from 'lucide-react';
 import { IncidentFilterParams } from '../../types/incident';
+import { listWorkspaces } from '../../api/workspaces';
+import { Workspace } from '../../types/workspace';
 
 interface IncidentFiltersProps {
   filters: IncidentFilterParams;
@@ -13,6 +15,13 @@ export const IncidentFilters: React.FC<IncidentFiltersProps> = ({
   onChange,
   onReset,
 }) => {
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+
+  useEffect(() => {
+    listWorkspaces()
+      .then((res) => setWorkspaces(res.items))
+      .catch(() => {});
+  }, []);
   return (
     <div className="bg-sre-900/60 border border-slate-800 rounded-xl p-4 mb-6 shadow-sm">
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
@@ -55,6 +64,22 @@ export const IncidentFilters: React.FC<IncidentFiltersProps> = ({
             <option value="INVESTIGATING">INVESTIGATING</option>
             <option value="RESOLVED">RESOLVED</option>
             <option value="CLOSED">CLOSED</option>
+          </select>
+        </div>
+
+        {/* Workspace Filter */}
+        <div>
+          <select
+            value={filters.workspace_id || ''}
+            onChange={(e) => onChange({ workspace_id: e.target.value || undefined, skip: 0 })}
+            className="w-full px-3 py-2 text-sm bg-sre-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500 font-mono"
+          >
+            <option value="">All Workspaces</option>
+            {workspaces.map((ws) => (
+              <option key={ws.id} value={ws.id}>
+                {ws.name}
+              </option>
+            ))}
           </select>
         </div>
 

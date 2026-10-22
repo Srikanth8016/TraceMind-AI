@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { getErrorMessage } from '../api/client';
-import axios, { AxiosError, AxiosHeaders } from 'axios';
+import { AxiosError, AxiosHeaders } from 'axios';
 
 describe('API Client Error Utilities', () => {
   it('extracts string detail from FastAPI HTTPException response', () => {

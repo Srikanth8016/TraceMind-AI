@@ -191,3 +191,27 @@ def get_current_active_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return current_user
+
+
+def get_optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Security(http_bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """
+    Retrieve User if valid Bearer token supplied, otherwise None.
+    Does not raise 401 if token is absent.
+    """
+    if credentials is None or not credentials.credentials:
+        return None
+    try:
+        payload = decode_access_token(credentials.credentials.strip())
+        user_id_str = payload.get("sub")
+        if not user_id_str:
+            return None
+        user_uuid = uuid.UUID(user_id_str)
+        user = db.get(User, user_uuid)
+        if user and user.is_active:
+            return user
+    except Exception:
+        return None
+    return None

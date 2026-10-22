@@ -153,6 +153,11 @@ def correlate_event_to_incident(session: Session, event: Event) -> Incident | No
         # Escalate severity to CRITICAL if a CRITICAL event occurs
         if event.level == "CRITICAL" and candidate.severity != "CRITICAL":
             candidate.severity = "CRITICAL"
+            try:
+                from app.services.integrations.notifications import dispatch_incident_notification
+                dispatch_incident_notification(session, candidate, "incident.severity_escalated")
+            except Exception as notify_exc:
+                logger.warning("Failed to dispatch severity escalation notification: %s", notify_exc)
 
         candidate.updated_at = datetime.now(timezone.utc)
         logger.info(
@@ -190,4 +195,11 @@ def correlate_event_to_incident(session: Session, event: Event) -> Incident | No
         event.service_name,
         fingerprint[:8],
     )
+
+    try:
+        from app.services.integrations.notifications import dispatch_incident_notification
+        dispatch_incident_notification(session, new_incident, "incident.created")
+    except Exception as notify_exc:
+        logger.warning("Failed to dispatch incident created notification: %s", notify_exc)
+
     return new_incident

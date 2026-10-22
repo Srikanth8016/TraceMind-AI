@@ -23,6 +23,7 @@ class IncidentCreate(BaseModel):
     environment: str = Field(default="production", min_length=1, max_length=50, description="Deployment environment.")
     severity: str = Field(default="ERROR", pattern="(?i)^(ERROR|CRITICAL|HIGH|MEDIUM|LOW|WARNING|INFO)$", description="Severity level: ERROR, CRITICAL, HIGH, etc.")
     status: IncidentStatus = Field(default=IncidentStatus.OPEN, description="Initial lifecycle status: OPEN, INVESTIGATING, RESOLVED, CLOSED.")
+    workspace_id: uuid.UUID | None = Field(default=None, description="Optional target team workspace UUID.")
 
 
 class IncidentStatusUpdate(BaseModel):
@@ -59,6 +60,7 @@ class IncidentResponse(BaseModel):
     last_seen_at: datetime = Field(..., description="Timestamp of the most recent correlated event.")
     event_count: int = Field(..., description="Total number of events grouped into this incident.")
     owner_id: uuid.UUID | None = Field(default=None, description="UUID of the incident owner/creator.")
+    workspace_id: uuid.UUID | None = Field(default=None, description="UUID of the workspace containing this incident.")
     created_at: datetime = Field(..., description="Timestamp when the incident was first created.")
     updated_at: datetime = Field(..., description="Timestamp when the incident was last modified.")
 

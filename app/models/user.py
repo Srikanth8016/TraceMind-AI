@@ -81,5 +81,13 @@ class User(Base):
     # 1-to-many relationship: a user owns multiple incidents
     incidents = relationship("Incident", back_populates="owner", lazy="select")
 
+    # 1-to-many relationship: a user has memberships in multiple workspaces
+    workspace_memberships = relationship(
+        "WorkspaceMembership",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
     def __repr__(self) -> str:
         return f"<User id={self.id!s} email={self.email!r} is_active={self.is_active}>"

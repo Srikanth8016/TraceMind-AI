@@ -15,7 +15,7 @@ from typing import Optional
 from fastapi import BackgroundTasks
 
 from app.config import get_settings
-from app.tasks import investigate_incident_task, process_event_task
+from app.tasks import investigate_incident_task, process_event_task, send_slack_notification_task
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,13 @@ def _run_sync_investigation_task(job_id: str, incident_id: str) -> None:
             incident_id,
             exc,
         )
+
+
+def _run_sync_slack_task(notification_id: str, payload_json: str) -> None:
+    try:
+        send_slack_notification_task.apply(args=[notification_id, payload_json])
+    except Exception as exc:
+        logger.exception("Error executing Slack notification in demo mode for %s: %s", notification_id, exc)
 
 
 def dispatch_event_processing(job_id: str, background_tasks: Optional[BackgroundTasks] = None) -> None:
@@ -77,3 +84,28 @@ def dispatch_incident_investigation(
             threading.Thread(target=_run_sync_investigation_task, args=(job_id, incident_id), daemon=True).start()
     else:
         investigate_incident_task.delay(job_id, incident_id)
+
+
+def dispatch_slack_notification(
+    notification_id: str,
+    payload_json: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> None:
+    """
+    Dispatch a Slack incident notification task.
+    In DEMO_MODE, runs asynchronously in-process via FastAPI BackgroundTasks or background thread.
+    In standard mode, dispatches to the Celery/Redis broker.
+    """
+    settings = get_settings()
+    if settings.DEMO_MODE:
+        logger.info(
+            "DEMO_MODE active: Scheduling Slack notification %s in-process via background task.",
+            notification_id,
+        )
+        if background_tasks is not None:
+            background_tasks.add_task(_run_sync_slack_task, notification_id, payload_json)
+        else:
+            threading.Thread(target=_run_sync_slack_task, args=(notification_id, payload_json), daemon=True).start()
+    else:
+        send_slack_notification_task.delay(notification_id, payload_json)
+

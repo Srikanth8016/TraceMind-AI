@@ -10,9 +10,9 @@ import {
   listIncidentInvestigations,
   getInvestigation,
 } from '../api/investigations';
-import { Incident } from '../../types/incident';
-import { TelemetryEvent } from '../../types/event';
-import { InvestigationJob, RootCauseHypothesis, RecommendedAction, RetrievedRunbookRef } from '../../types/investigation';
+import { Incident } from '../types/incident';
+import { TelemetryEvent } from '../types/event';
+import { InvestigationJob, RootCauseHypothesis, RecommendedAction, RetrievedRunbookRef } from '../types/investigation';
 import { getErrorMessage } from '../api/client';
 import { SeverityBadge } from '../components/common/SeverityBadge';
 import { StatusBadge } from '../components/common/StatusBadge';

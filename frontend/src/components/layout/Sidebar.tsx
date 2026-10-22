@@ -7,6 +7,7 @@ import {
   Server,
   Terminal,
   Shield,
+  Users,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -30,6 +31,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
       to: '/knowledge',
       label: 'Runbook RAG',
       icon: <BookOpen className="w-4 h-4 mr-3" />,
+    },
+    {
+      to: '/workspaces',
+      label: 'Workspaces',
+      icon: <Users className="w-4 h-4 mr-3" />,
     },
     {
       to: '/operations',

@@ -14,6 +14,7 @@ export interface Incident {
   last_seen_at: string;
   event_count: number;
   owner_id?: string | null;
+  workspace_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -35,6 +36,7 @@ export interface IncidentFilterParams {
   search?: string;
   sort_by?: string;
   order?: 'asc' | 'desc';
+  workspace_id?: string;
 }
 
 export interface IncidentCreatePayload {
@@ -44,6 +46,7 @@ export interface IncidentCreatePayload {
   environment: string;
   severity: string;
   status?: IncidentStatus;
+  workspace_id?: string | null;
 }
 
 export interface IncidentStatusUpdatePayload {

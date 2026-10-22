@@ -37,6 +37,14 @@ DEV_PLACEHOLDER_KEYS = {
     "changeme",
 }
 
+DEV_PLACEHOLDER_JWT_SECRETS = {
+    "replace-with-your-secure-random-jwt-secret-at-least-32-chars",
+    "tracemind-default-production-safe-jwt-secret-key-32chars",
+    "secret",
+    "changeme",
+    "test-jwt-secret",
+}
+
 
 class AppEnvironment(str, Enum):
     """Application runtime environment."""
@@ -144,6 +152,60 @@ class Settings(BaseModel):
         description="Access token lifespan in minutes.",
     )
 
+    # External Alert Integrations & Notifications (Milestone 19)
+    DATADOG_WEBHOOK_SECRET: Optional[str] = Field(
+        default=None,
+        description="Shared secret or bearer token for verifying inbound Datadog webhooks.",
+    )
+    DATADOG_WEBHOOK_ENABLED: bool = Field(
+        default=True,
+        description="Enable or disable the inbound Datadog webhook endpoint.",
+    )
+
+    PAGERDUTY_WEBHOOK_SECRET: Optional[str] = Field(
+        default=None,
+        description="HMAC secret for verifying X-PagerDuty-Signature on inbound v3 webhooks.",
+    )
+    PAGERDUTY_WEBHOOK_ENABLED: bool = Field(
+        default=True,
+        description="Enable or disable the inbound PagerDuty webhook endpoint.",
+    )
+    PAGERDUTY_WEBHOOK_MAX_AGE_SECONDS: int = Field(
+        default=300,
+        ge=10,
+        le=3600,
+        description="Maximum allowed timestamp drift in seconds to protect against replay attacks.",
+    )
+
+    SLACK_WEBHOOK_URL: Optional[str] = Field(
+        default=None,
+        description="Slack Incoming Webhook URL for outbound incident notifications.",
+    )
+    SLACK_NOTIFICATIONS_ENABLED: bool = Field(
+        default=False,
+        description="Enable or disable outbound Slack incident notifications.",
+    )
+    SLACK_NOTIFICATION_MIN_SEVERITY: str = Field(
+        default="ERROR",
+        description="Minimum incident severity that triggers a Slack notification (e.g. WARNING, ERROR, CRITICAL).",
+    )
+    SLACK_NOTIFY_ON_INCIDENT_CREATED: bool = Field(
+        default=True,
+        description="Send Slack alert when a new incident is created or correlated.",
+    )
+    SLACK_NOTIFY_ON_STATUS_CHANGED: bool = Field(
+        default=True,
+        description="Send Slack alert when incident status changes (e.g. ACKNOWLEDGED, RESOLVED).",
+    )
+    SLACK_NOTIFY_ON_INVESTIGATION_COMPLETED: bool = Field(
+        default=True,
+        description="Send Slack alert when AI root-cause investigation completes or fails.",
+    )
+    APP_BASE_URL: Optional[str] = Field(
+        default="http://localhost:3000",
+        description="Base URL of TraceMind web application, used for interactive links in Slack alerts.",
+    )
+
     @model_validator(mode="before")
     @classmethod
     def load_from_env(cls, data: dict) -> dict:
@@ -153,7 +215,16 @@ class Settings(BaseModel):
             if field_name in os.environ:
                 val = os.environ[field_name]
                 # Cast booleans
-                if field_name in ("CELERY_TASK_ALWAYS_EAGER", "DEMO_MODE"):
+                if field_name in (
+                    "CELERY_TASK_ALWAYS_EAGER",
+                    "DEMO_MODE",
+                    "DATADOG_WEBHOOK_ENABLED",
+                    "PAGERDUTY_WEBHOOK_ENABLED",
+                    "SLACK_NOTIFICATIONS_ENABLED",
+                    "SLACK_NOTIFY_ON_INCIDENT_CREATED",
+                    "SLACK_NOTIFY_ON_STATUS_CHANGED",
+                    "SLACK_NOTIFY_ON_INVESTIGATION_COMPLETED",
+                ):
                     env_dict[field_name] = val.lower() in ("true", "1", "yes")
                 elif field_name in (
                     "DB_POOL_SIZE",
@@ -163,6 +234,7 @@ class Settings(BaseModel):
                     "INCIDENT_CORRELATION_WINDOW_SECONDS",
                     "EMBEDDING_DIMENSION",
                     "JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
+                    "PAGERDUTY_WEBHOOK_MAX_AGE_SECONDS",
                 ):
                     try:
                         env_dict[field_name] = int(val)
@@ -222,19 +294,42 @@ class Settings(BaseModel):
                 )
 
             # 3. JWT Secret Key validation in production
-            if not self.JWT_SECRET_KEY or self.JWT_SECRET_KEY in ("replace-with-your-secure-random-jwt-secret-at-least-32-chars", ""):
+            if not self.JWT_SECRET_KEY or self.JWT_SECRET_KEY in DEV_PLACEHOLDER_JWT_SECRETS:
                 raise ValueError(
                     "Production security violation: JWT_SECRET_KEY cannot be empty or set to an insecure placeholder."
                 )
-            if len(self.JWT_SECRET_KEY) < 16:
+            if len(self.JWT_SECRET_KEY) < 32:
                 raise ValueError(
-                    "Production security violation: JWT_SECRET_KEY must be at least 16 characters long."
+                    "Production security violation: JWT_SECRET_KEY must be at least 32 characters long."
                 )
 
-            # 4. Production database should not point to localhost unless overridden
-            if "@localhost" in self.DATABASE_URL or "@127.0.0.1" in self.DATABASE_URL:
-                # Warning or check if running outside containers
-                pass
+            # 4. Production database driver validation (SQLite forbidden in production)
+            if self.DATABASE_URL.startswith("sqlite"):
+                raise ValueError(
+                    "Production configuration violation: SQLite is not supported in production mode; PostgreSQL is required."
+                )
+
+            # 5. Outbound Slack notification validation
+            if self.SLACK_NOTIFICATIONS_ENABLED:
+                if (
+                    not self.SLACK_WEBHOOK_URL
+                    or "YOUR_WORKSPACE_ID" in self.SLACK_WEBHOOK_URL
+                    or "PLACEHOLDER" in self.SLACK_WEBHOOK_URL
+                    or "T00000000" in self.SLACK_WEBHOOK_URL
+                ):
+                    raise ValueError(
+                        "Production configuration violation: SLACK_WEBHOOK_URL must be configured when SLACK_NOTIFICATIONS_ENABLED is True."
+                    )
+
+            # 6. Webhook secrets validation in production
+            if self.DATADOG_WEBHOOK_SECRET == "replace-with-datadog-webhook-secret-token":
+                raise ValueError(
+                    "Production security violation: DATADOG_WEBHOOK_SECRET cannot be set to example placeholder."
+                )
+            if self.PAGERDUTY_WEBHOOK_SECRET == "replace-with-pagerduty-webhook-hmac-secret":
+                raise ValueError(
+                    "Production security violation: PAGERDUTY_WEBHOOK_SECRET cannot be set to example placeholder."
+                )
 
         return self
 

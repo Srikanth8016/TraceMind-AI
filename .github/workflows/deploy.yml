@@ -1,0 +1,109 @@
+name: CD — Production Deployment Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Target deployment environment"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+      skip_migrations:
+        description: "Skip database migrations (not recommended)"
+        required: false
+        default: false
+        type: boolean
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  pre-deploy-validation:
+    name: Pre-Deployment Safety Checks
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate migration chain consistency
+        run: |
+          python -m alembic check
+
+  deploy-and-migrate:
+    name: Execute Release & Verify Health
+    needs: pre-deploy-validation
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Database Migrations
+        if: ${{ !inputs.skip_migrations }}
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m alembic upgrade head
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+
+      - name: Post-Deployment Readiness Verification
+        env:
+          APP_PROD_URL: ${{ secrets.APP_PROD_URL }}
+        run: |
+          if [ -z "$APP_PROD_URL" ]; then
+            echo "APP_PROD_URL secret not configured; skipping remote probe verification."
+            exit 0
+          fi
+          echo "Verifying application readiness at $APP_PROD_URL/ready..."
+          for i in {1..12}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_PROD_URL/ready" || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "Production readiness probe passed (HTTP 200)."
+              exit 0
+            fi
+            echo "Attempt $i: Received HTTP $STATUS, retrying in 5 seconds..."
+            sleep 5
+          done
+          echo "CRITICAL: Readiness probe failed after 60 seconds! Initiate automated rollback."
+          exit 1

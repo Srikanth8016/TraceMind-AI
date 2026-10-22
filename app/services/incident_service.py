@@ -22,8 +22,15 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.event import Event
 from app.models.incident import Incident, IncidentStatus
+from app.models.workspace import Workspace, WorkspaceMembership, WorkspaceRole
 from app.schemas.incident import IncidentCreate, IncidentStatusUpdate, IncidentUpdate
 from app.services.fingerprint import generate_fingerprint
+from app.services.rbac import (
+    WorkspaceAccessDeniedError,
+    WorkspaceNotFoundError,
+    can_manage_workspace,
+    can_write_incidents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +176,7 @@ ALLOWED_SORT_COLUMNS = {
     "title": Incident.title,
     "service_name": Incident.service_name,
     "event_count": Incident.event_count,
+    "workspace_id": Incident.workspace_id,
 }
 
 
@@ -185,6 +193,40 @@ class IncidentService:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def _get_user_membership(self, workspace_id: uuid.UUID, user_id: uuid.UUID) -> WorkspaceMembership | None:
+        stmt = select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == workspace_id,
+            WorkspaceMembership.user_id == user_id,
+        )
+        return self.db.execute(stmt).scalars().first()
+
+    def _check_incident_read_access(self, incident: Incident, user_id: uuid.UUID | None) -> bool:
+        if user_id is None:
+            return True
+        if incident.workspace_id is not None:
+            mem = self._get_user_membership(incident.workspace_id, user_id)
+            if mem is not None:
+                return True
+            return incident.owner_id == user_id
+        return incident.owner_id == user_id or incident.owner_id is None
+
+    def _authorize_incident_action(self, incident: Incident, user_id: uuid.UUID | None, action: str) -> None:
+        if user_id is None:
+            return
+        if incident.workspace_id is not None:
+            mem = self._get_user_membership(incident.workspace_id, user_id)
+            if mem is None:
+                raise IncidentNotFoundError(incident.id)
+            if action == "write":
+                if not can_write_incidents(mem.role):
+                    raise WorkspaceAccessDeniedError("Workspace viewers have read-only access and cannot modify incidents.")
+            elif action == "delete":
+                if not can_manage_workspace(mem.role) and incident.owner_id != user_id:
+                    raise WorkspaceAccessDeniedError("Only workspace administrators can delete incidents.")
+        else:
+            if incident.owner_id is not None and incident.owner_id != user_id:
+                raise IncidentNotFoundError(incident.id)
+
     def create_incident(
         self,
         incident_in: IncidentCreate,
@@ -192,10 +234,16 @@ class IncidentService:
     ) -> Incident:
         """
         Create and persist a new Incident in the database.
-
-        Ensures atomic transaction management: commits the session on success,
-        rolls back on failure, and refreshes the instance attributes.
+        Validates workspace membership and responder permissions if workspace_id is set.
         """
+        target_ws_id = getattr(incident_in, "workspace_id", None)
+        if target_ws_id is not None and owner_id is not None:
+            mem = self._get_user_membership(target_ws_id, owner_id)
+            if mem is None:
+                raise WorkspaceNotFoundError(target_ws_id)
+            if not can_write_incidents(mem.role):
+                raise WorkspaceAccessDeniedError("Workspace viewers have read-only access and cannot create incidents.")
+
         now = datetime.now(timezone.utc)
         fingerprint = generate_fingerprint(
             service_name=incident_in.service_name,
@@ -217,6 +265,7 @@ class IncidentService:
             severity=incident_in.severity,
             status=status_val,
             owner_id=owner_id,
+            workspace_id=target_ws_id,
             first_seen_at=now,
             last_seen_at=now,
             event_count=1,
@@ -227,7 +276,12 @@ class IncidentService:
             self.db.add(incident)
             self.db.commit()
             self.db.refresh(incident)
-            logger.info("Successfully created incident %s (title=%r, owner_id=%s)", incident.id, incident.title, owner_id)
+            logger.info("Successfully created incident %s (title=%r, owner_id=%s, ws=%s)", incident.id, incident.title, owner_id, target_ws_id)
+            try:
+                from app.services.integrations.notifications import dispatch_incident_notification
+                dispatch_incident_notification(self.db, incident, "incident.created")
+            except Exception as notify_exc:
+                logger.warning("Failed to trigger Slack notification on incident creation: %s", notify_exc)
             return incident
         except IntegrityError as exc:
             self.db.rollback()
@@ -250,19 +304,16 @@ class IncidentService:
     ) -> Incident:
         """
         Update the lifecycle status of an incident within an atomic transaction.
-
-        Applies row locking to serialize concurrent status updates, commits the
-        change, and updates the updated_at timestamp. Scoped to owner_id if provided.
+        Enforces workspace RBAC rules and workflow transition rules.
         """
         try:
-            # Row-level lock where supported to prevent concurrent lost updates
             stmt = select(Incident).where(Incident.id == incident_id)
-            if owner_id is not None:
-                stmt = stmt.where(Incident.owner_id == owner_id)
             incident = self.db.execute(stmt.with_for_update()).scalars().first()
 
             if incident is None:
                 raise IncidentNotFoundError(incident_id)
+
+            self._authorize_incident_action(incident, owner_id, action="write")
 
             # Enforce workflow state machine transition rules
             target_status = validate_status_transition(incident.status, new_status)
@@ -272,8 +323,13 @@ class IncidentService:
             self.db.commit()
             self.db.refresh(incident)
             logger.info("Updated incident %s status to %s", incident_id, target_status.value)
+            try:
+                from app.services.integrations.notifications import dispatch_incident_notification
+                dispatch_incident_notification(self.db, incident, "incident.status_changed")
+            except Exception as notify_exc:
+                logger.warning("Failed to trigger Slack notification on status update: %s", notify_exc)
             return incident
-        except (IncidentNotFoundError, IncidentInvalidTransitionError, IncidentValidationError):
+        except (IncidentNotFoundError, IncidentInvalidTransitionError, IncidentValidationError, WorkspaceAccessDeniedError):
             self.db.rollback()
             raise
         except IntegrityError as exc:
@@ -296,19 +352,16 @@ class IncidentService:
     ) -> Incident:
         """
         Update supported fields of an existing incident within an atomic transaction.
-
-        Applies row locking to serialize concurrent updates. Only fields that
-        are explicitly provided (not None) are modified. Status updates enforce
-        the same lifecycle workflow transition rules. Scoped to owner_id if provided.
+        Enforces workspace RBAC rules.
         """
         try:
             stmt = select(Incident).where(Incident.id == incident_id)
-            if owner_id is not None:
-                stmt = stmt.where(Incident.owner_id == owner_id)
             incident = self.db.execute(stmt.with_for_update()).scalars().first()
 
             if incident is None:
                 raise IncidentNotFoundError(incident_id)
+
+            self._authorize_incident_action(incident, owner_id, action="write")
 
             if incident_in.title is not None:
                 incident.title = incident_in.title
@@ -323,7 +376,7 @@ class IncidentService:
             self.db.refresh(incident)
             logger.info("Successfully updated incident %s", incident_id)
             return incident
-        except (IncidentNotFoundError, IncidentInvalidTransitionError, IncidentValidationError):
+        except (IncidentNotFoundError, IncidentInvalidTransitionError, IncidentValidationError, WorkspaceAccessDeniedError):
             self.db.rollback()
             raise
         except IntegrityError as exc:
@@ -344,21 +397,22 @@ class IncidentService:
         owner_id: uuid.UUID | None = None,
     ) -> bool:
         """
-        Delete an existing incident within an atomic transaction. Scoped to owner_id if provided.
+        Delete an existing incident within an atomic transaction.
+        Enforces workspace ADMIN role or owner permission.
         """
         try:
             stmt = select(Incident).where(Incident.id == incident_id)
-            if owner_id is not None:
-                stmt = stmt.where(Incident.owner_id == owner_id)
             incident = self.db.execute(stmt).scalars().first()
             if incident is None:
                 raise IncidentNotFoundError(incident_id)
+
+            self._authorize_incident_action(incident, owner_id, action="delete")
 
             self.db.delete(incident)
             self.db.commit()
             logger.info("Successfully deleted incident %s", incident_id)
             return True
-        except IncidentNotFoundError:
+        except (IncidentNotFoundError, WorkspaceAccessDeniedError):
             self.db.rollback()
             raise
         except SQLAlchemyError as exc:
@@ -381,16 +435,35 @@ class IncidentService:
         limit: int = 20,
         offset: int = 0,
         owner_id: uuid.UUID | None = None,
+        workspace_id: uuid.UUID | None = None,
     ) -> tuple[Sequence[Incident], int]:
         """
         Query, filter, search, sort, and paginate incidents with deterministic ordering.
-        Scoped to owner_id if provided.
+        Supports workspace isolation and user ownership scoping.
         """
         stmt = select(Incident)
 
-        # 0. User ownership scoping (allows system-correlated incidents with NULL owner_id)
-        if owner_id is not None:
-            stmt = stmt.where(or_(Incident.owner_id == owner_id, Incident.owner_id.is_(None)))
+        # 0. Scoping: Workspace-specific or multi-workspace + personal
+        if workspace_id is not None:
+            if owner_id is not None:
+                mem = self._get_user_membership(workspace_id, owner_id)
+                if mem is None:
+                    raise WorkspaceNotFoundError(workspace_id)
+            stmt = stmt.where(Incident.workspace_id == workspace_id)
+        elif owner_id is not None:
+            # Personal incidents + incidents in workspaces user is a member of + unowned legacy incidents
+            user_workspaces_subquery = (
+                select(WorkspaceMembership.workspace_id)
+                .where(WorkspaceMembership.user_id == owner_id)
+                .scalar_subquery()
+            )
+            stmt = stmt.where(
+                or_(
+                    Incident.owner_id == owner_id,
+                    Incident.workspace_id.in_(user_workspaces_subquery),
+                    (Incident.owner_id.is_(None) & Incident.workspace_id.is_(None)),
+                )
+            )
 
         # 1. Search by title (case-insensitive substring) and optional description
         if search is not None and search.strip():
@@ -446,24 +519,14 @@ class IncidentService:
         owner_id: uuid.UUID | None = None,
     ) -> Incident | None:
         """
-        Retrieve a single incident by its UUID primary key, optionally scoped to owner_id.
-
-        Parameters
-        ----------
-        incident_id : uuid.UUID
-            The unique identifier of the incident.
-        owner_id : uuid.UUID | None
-            If provided, scopes retrieval to the specified owner.
-
-        Returns
-        -------
-        Incident | None
-            The Incident model if found and owned, or None if not found/unauthorized.
+        Retrieve a single incident by its UUID primary key, validating read access.
         """
-        stmt = select(Incident).where(Incident.id == incident_id)
-        if owner_id is not None:
-            stmt = stmt.where(or_(Incident.owner_id == owner_id, Incident.owner_id.is_(None)))
-        return self.db.execute(stmt).scalars().first()
+        incident = self.db.execute(select(Incident).where(Incident.id == incident_id)).scalars().first()
+        if incident is None:
+            return None
+        if not self._check_incident_read_access(incident, owner_id):
+            return None
+        return incident
 
     def list_incident_events(
         self,

@@ -1,9 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { getHealth, getDbHealth, getReadiness, getMetrics } from '../api/ops';
-import { HealthResponse, DbHealthResponse, ReadinessResponse, MetricsSnapshot } from '../../types/ops';
+import { HealthResponse, DbHealthResponse, ReadinessResponse, MetricsSnapshot } from '../types/ops';
 import { getErrorMessage } from '../api/client';
 import { StatCard } from '../components/common/StatCard';
-import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { ErrorAlert } from '../components/common/ErrorAlert';
 import {
   Server,
@@ -192,7 +191,7 @@ export const OperationsPage: React.FC = () => {
                       className={`px-3.5 py-2 rounded-lg border font-mono text-xs flex items-center space-x-2 ${badgeColor}`}
                     >
                       <span className="font-bold">{code}</span>
-                      <span className="text-slate-400 font-sans">({count} requests)</span>
+                      <span className="text-slate-400 font-sans">({String(count)} requests)</span>
                     </div>
                   );
                 })}

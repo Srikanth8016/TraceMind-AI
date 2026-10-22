@@ -1044,11 +1044,230 @@ To run the complete test suite:
 .venv\Scripts\pytest
 ```
 
-To run logging, configuration, and readiness tests:
-```powershell
-.venv\Scripts\pytest tests/test_logging.py tests/test_config.py tests/test_readiness.py tests/test_health.py -v
+---
+
+## Milestone 17 — Team Workspaces & Role-Based Access Control (RBAC)
+
+Extends the single-user incident model into a multi-tenant workspace architecture.
+- **Roles**: `admin` (full management & member invites), `responder` (declare & update incidents, run AI investigations), `viewer` (read-only triage).
+- **Isolation**: Workspaces isolate incidents, search queries, and investigations. Cross-tenant access is rejected with `404 Not Found`.
+- **Invariants**: Strict protection prevents removing or demoting the last remaining workspace administrator.
+
+---
+
+## Milestone 19 — External Alert Integrations & Outbound Notifications
+
+Provides enterprise-grade inbound alert ingestion from **Datadog** and **PagerDuty**, alongside reliable outbound incident alerting to **Slack**.
+
+### Architecture Overview
+
+```
+                        ┌──────────────────────────────────────────────┐
+                        │              TraceMind AI Platform           │
+                        │                                              │
+[Datadog Webhook]  ────►│  POST /api/v1/webhooks/datadog               │
+(DD-WEBHOOK-TOKEN)      │  (Token Auth & Tag Normalization)            │
+                        │         │                                    │
+[PagerDuty Webhook] ───►│  POST /api/v1/webhooks/pagerduty             │
+(HMAC-SHA256 v1=<sig>)  │  (HMAC Verification & Replay Protection)     │
+                        │         │                                    │
+                        │         ▼                                    │
+                        │  [Deduplication Pipeline (webhook_events)]   │
+                        │         │ (Skip if duplicate provider ID)    │
+                        │         ▼                                    │
+                        │  [Event Ingestion & Celery Task Queue]       │
+                        │         │                                    │
+                        │         ▼                                    │
+                        │  [Incident Correlation & Lifecycle Engine]   │
+                        │         │ (After-commit dispatch)            │
+                        │         ▼                                    │
+                        │  [Notification Service (notification_logs)]  │
+                        │  (Idempotency Key & Rules Filtering)         │
+                        └─────────┬────────────────────────────────────┘
+                                  │
+                                  ▼ (HTTP POST / Block Kit)
+                        [Slack Incoming Webhook]
 ```
 
+### Inbound Alert Integrations
 
+#### 1. Datadog Webhook (`POST /api/v1/webhooks/datadog`)
+- **Authentication**: Verifies token against `DATADOG_WEBHOOK_SECRET` using constant-time comparison (`hmac.compare_digest`). Accepts token via `DD-WEBHOOK-TOKEN`, `X-Datadog-Token`, `Authorization: Bearer <token>`, or query parameter `?token=`.
+- **Normalization**: Automatically extracts `service` and `env` from Datadog tags (`service:auth-api`, `env:production`). Maps `alert_type` and priority `P1` to `CRITICAL`, `error` to `ERROR`, and `warning` to `WARNING`.
+- **Workspace Scoping**: Accepts optional `?workspace_id=<uuid>` parameter or `workspace:<uuid>` tag for team workspace routing.
+- **Deduplication**: Records incoming alert IDs in `webhook_events`. Duplicate webhooks are skipped without creating duplicate events or incidents.
 
+#### 2. PagerDuty Webhook v3/v2 (`POST /api/v1/webhooks/pagerduty`)
+- **Authentication**: Computes HMAC-SHA256 over raw request body and verifies against `X-PagerDuty-Signature` header (`v1=<hash>`) using constant-time comparison.
+- **Replay Protection**: Checks `event.occurred_at` timestamp against `PAGERDUTY_WEBHOOK_MAX_AGE_SECONDS` (default: 300s). Replayed or stale alerts are rejected with `HTTP 400 Bad Request`.
+- **Normalization**: Supports both PagerDuty v3 (`{"event": {...}}`) and v2 legacy (`{"messages": [...]}`) payloads. Maps `urgency: high` to `CRITICAL` and extracts service names cleanly.
+- **Deduplication**: Uses PagerDuty event/incident ID to ensure idempotent ingestion.
+
+---
+
+### Outbound Slack Notifications
+
+TraceMind AI dispatches formatted **Slack Block Kit** notifications for key incident lifecycle transitions:
+- `incident.created`: New incident declared or correlated.
+- `incident.severity_escalated`: Severity upgraded from ERROR to CRITICAL.
+- `incident.status_changed`: Status updated (e.g., ACKNOWLEDGED, RESOLVED).
+- `investigation.completed`: AI investigation generated hypotheses and recommendations.
+- `investigation.failed`: AI investigation encountered a fatal error.
+
+#### Reliability & Delivery Guarantees
+- **Asynchronous & Non-Blocking**: Dispatched outside active database transactions via Celery background tasks or in-process background worker. Core event ingestion and incident updates never fail if Slack is unreachable.
+- **At-Most-Once Delivery (Idempotency)**: Every notification is tracked in the `notification_logs` table with a deterministic `idempotency_key` (e.g. `incident_created:<uuid>`, `status_changed:<uuid>:<status>`). Celery task retries never deliver duplicate Slack messages.
+- **Configurable Rules & Thresholds**:
+  - `SLACK_NOTIFICATION_MIN_SEVERITY`: Only incidents at or above the threshold trigger alerts (e.g., `ERROR` suppresses `INFO` and `WARNING`).
+  - Granular toggles: `SLACK_NOTIFY_ON_INCIDENT_CREATED`, `SLACK_NOTIFY_ON_STATUS_CHANGED`, `SLACK_NOTIFY_ON_INVESTIGATION_COMPLETED`.
+- **Deep Links**: When `APP_BASE_URL` is configured (e.g., `http://localhost:3000`), interactive Slack buttons provide direct links to the incident console.
+
+---
+
+### Security & Secret Redaction
+
+TraceMind AI enforces strict security controls:
+1. **Timing Attack Protection**: All signature and token comparisons use `hmac.compare_digest`.
+2. **Replay Protection**: Timestamps are bounded and validated.
+3. **Structured Log Sanitization**: Log formatters automatically redact:
+   - Slack Incoming Webhook URLs (`https://hooks.slack.com/services/...` -> `[REDACTED_SLACK_WEBHOOK]`)
+   - PagerDuty signatures (`X-PagerDuty-Signature: ...` -> `[REDACTED_SIGNATURE]`)
+   - Datadog tokens (`DD-WEBHOOK-TOKEN: ...` -> `[REDACTED_TOKEN]`)
+   - API keys, JWT bearer tokens, and database passwords.
+
+---
+
+### Configuration Reference
+
+Add these environment variables to `.env` (or set via container environment):
+
+```ini
+# Inbound Datadog Webhook
+DATADOG_WEBHOOK_SECRET=replace-with-datadog-webhook-secret-token
+DATADOG_WEBHOOK_ENABLED=True
+
+# Inbound PagerDuty Webhook v3
+PAGERDUTY_WEBHOOK_SECRET=replace-with-pagerduty-webhook-hmac-secret
+PAGERDUTY_WEBHOOK_ENABLED=True
+PAGERDUTY_WEBHOOK_MAX_AGE_SECONDS=300
+
+# Outbound Slack Notifications
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR_WORKSPACE_ID/YOUR_CHANNEL_ID/YOUR_SECRET_TOKEN
+SLACK_NOTIFICATIONS_ENABLED=False
+SLACK_NOTIFICATION_MIN_SEVERITY=ERROR
+SLACK_NOTIFY_ON_INCIDENT_CREATED=True
+SLACK_NOTIFY_ON_STATUS_CHANGED=True
+SLACK_NOTIFY_ON_INVESTIGATION_COMPLETED=True
+APP_BASE_URL=http://localhost:3000
+```
+
+---
+
+## Milestone 20 — Production Deployment Automation & SRE Runbook
+
+Prepares TraceMind AI for reliable zero-downtime production deployment with automated CI/CD pipelines, container orchestration, database migration safety gates, and post-deployment rollback procedures.
+
+### 1. CI/CD Pipeline Architecture
+
+TraceMind AI enforces a strict separation between **Continuous Integration (CI)** and **Continuous Deployment (CD)** via GitHub Actions:
+
+```
+                  [Developer Pull Request or Push to main/master]
+                                       │
+                                       ▼
+                     ┌───────────────────────────────────┐
+                     │          GitHub Actions CI        │
+                     │  (.github/workflows/ci.yml)       │
+                     └─────────────────┬─────────────────┘
+                                       │
+         ┌─────────────────────────────┼─────────────────────────────┐
+         ▼                             ▼                             ▼
+ [Backend Testing & Migrations] [Frontend Build & Test]      [Docker Container Build]
+ - PostgreSQL 16 + Redis        - Node.js 20                  - Docker Buildx
+ - alembic upgrade head         - npm ci && npm test          - Non-root user 10001
+ - pytest tests/ -v (316 tests) - npm run build (Vite bundle) - Healthcheck validation
+         │                             │                             │
+         └─────────────────────────────┼─────────────────────────────┘
+                                       │
+                                       ▼ All checks passed
+                     ┌───────────────────────────────────┐
+                     │          GitHub Actions CD        │
+                     │  (.github/workflows/deploy.yml)   │
+                     │  (Environment: production)       │
+                     └─────────────────┬─────────────────┘
+                                       │
+                         [Manual SRE Approval Gate]
+                                       │
+                         [Automated DB Migration Step]
+                         (python -m alembic upgrade head)
+                                       │
+                         [Deploy Web & Worker Containers]
+                         (ghcr.io image deployment)
+                                       │
+                         [Post-Deploy Health Probe Verification]
+                         (Curl /ready until HTTP 200, or rollback)
+```
+
+### 2. Container Architecture & Startup Ordering
+
+In production Docker Compose (`docker-compose.yml`), container startup is deterministically sequenced to prevent race conditions:
+
+1. **`db` (PostgreSQL 16 with pgvector):** Starts first. Healthcheck verifies `pg_isready`.
+2. **`redis` (Redis 7):** Starts first. Healthcheck verifies `redis-cli ping`.
+3. **`migration` (One-off container):** Starts once `db` is healthy. Executes `alembic upgrade head` and exits (`restart: "no"`).
+4. **`api` & `worker`:** Start only after `migration` completes with exit code 0 (`condition: service_completed_successfully`). This eliminates database race conditions where API servers or Celery workers query tables before schema migrations finish.
+
+### 3. Fail-Fast Production Configuration Validation
+
+When `ENVIRONMENT=production` or `ENVIRONMENT=staging`, TraceMind AI automatically validates configuration on startup and halts immediately if insecure values are detected:
+
+| Rule | Constraint | Error on Violation |
+|---|---|---|
+| **API Key Safety** | `TRACEMIND_API_KEY` cannot match development placeholders and must be >= 16 characters. | `ValueError("Production security violation: TRACEMIND_API_KEY...")` |
+| **JWT Secret Safety** | `JWT_SECRET_KEY` cannot match development placeholders and must be >= 32 characters. | `ValueError("Production security violation: JWT_SECRET_KEY...")` |
+| **Database Engine** | `DATABASE_URL` cannot use SQLite in production. PostgreSQL is strictly required. | `ValueError("Production configuration violation: SQLite is not supported...")` |
+| **Worker Concurrency** | `CELERY_TASK_ALWAYS_EAGER` cannot be `True` in production (unless running in `DEMO_MODE=True`). | `ValueError("Production configuration violation: CELERY_TASK_ALWAYS_EAGER...")` |
+| **Slack Webhook URL** | If `SLACK_NOTIFICATIONS_ENABLED=True`, `SLACK_WEBHOOK_URL` must be a valid custom webhook. | `ValueError("Production configuration violation: SLACK_WEBHOOK_URL...")` |
+| **Integration Secrets** | Datadog/PagerDuty secrets cannot be example template strings. | `ValueError("Production security violation: ...")` |
+
+### 4. Database Migration Safety & Rollback Procedures
+
+#### Pre-Migration Backup (Required before schema updates)
+Before running schema migrations in production, take a point-in-time logical backup:
+```bash
+# Dump production database schema and data
+pg_dump -U tracemind -d tracemind -Fc -f "tracemind_pre_migration_$(date +%Y%m%d_%H%M%S).dump"
+```
+
+#### Safe Migration Execution
+Migrations are executed independently from web servers using the dedicated runner:
+```bash
+python scripts/migrate.py
+# or: python -m alembic upgrade head
+```
+
+#### Rolling Back a Failed Application Release
+1. **Application Rollback (Container Version):**
+   Revert the web and worker containers to the previously tagged container image (e.g. `ghcr.io/org/tracemind-ai:v1.18.0`).
+2. **Schema Rollback (Alembic Downgrade):**
+   If the migration was backward-compatible (added columns/indexes), database rollback is often unnecessary.
+   If schema rollback is required:
+   ```bash
+   # Check current migration revision
+   python -m alembic current
+   # Revert one revision
+   python -m alembic downgrade -1
+   ```
+3. **Database Restore (Disaster Recovery):**
+   If an irrecoverable migration failure occurs:
+   ```bash
+   pg_restore -U tracemind -d tracemind --clean --if-exists "tracemind_pre_migration_<timestamp>.dump"
+   ```
+
+### 5. Production Health Verification
+
+After deployment, verify the service endpoints:
+- **Liveness Probe (`GET /health`):** Verifies the web server process is responsive. Does not touch DB or Redis. Returns `HTTP 200`.
+- **Readiness Probe (`GET /ready`):** Executes `SELECT 1` against PostgreSQL and pings Redis. Returns `HTTP 200` only when all backing infrastructure is healthy.
+- **Operational Metrics (`GET /metrics`):** Reports request count, average latency, and status code distribution.
 

@@ -27,6 +27,7 @@ from app.services.incident_service import (
     IncidentService,
     get_incident_service,
 )
+from app.services.rbac import WorkspaceAccessDeniedError, WorkspaceNotFoundError
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
@@ -46,7 +47,18 @@ def create_incident(
     """
     Create a new incident via IncidentService owned by the current active user.
     """
-    return incident_service.create_incident(incident_in, owner_id=current_user.id)
+    try:
+        return incident_service.create_incident(incident_in, owner_id=current_user.id)
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        )
+    except WorkspaceAccessDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
 
 
 @router.patch(
@@ -70,7 +82,13 @@ def update_incident_status(
     """
     Update incident lifecycle status within an atomic transaction for owner.
     """
-    return incident_service.update_incident_status(incident_id, status_in.status, owner_id=current_user.id)
+    try:
+        return incident_service.update_incident_status(incident_id, status_in.status, owner_id=current_user.id)
+    except WorkspaceAccessDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
 
 
 @router.put(
@@ -92,7 +110,13 @@ def update_incident(
     """
     Update incident fields via IncidentService for owner.
     """
-    return incident_service.update_incident(incident_id, incident_in, owner_id=current_user.id)
+    try:
+        return incident_service.update_incident(incident_id, incident_in, owner_id=current_user.id)
+    except WorkspaceAccessDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
 
 
 @router.patch(
@@ -114,7 +138,13 @@ def patch_incident(
     """
     Partially update incident fields via IncidentService for owner.
     """
-    return incident_service.update_incident(incident_id, incident_in, owner_id=current_user.id)
+    try:
+        return incident_service.update_incident(incident_id, incident_in, owner_id=current_user.id)
+    except WorkspaceAccessDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
 
 
 @router.delete(
@@ -132,10 +162,16 @@ def delete_incident(
     current_user: User = Depends(get_current_active_user),
 ) -> None:
     """
-    Delete an incident via IncidentService for owner. Returns HTTP 204 No Content.
+    Delete an incident via IncidentService for owner or workspace admin. Returns HTTP 204 No Content.
     """
-    incident_service.delete_incident(incident_id, owner_id=current_user.id)
-    return None
+    try:
+        incident_service.delete_incident(incident_id, owner_id=current_user.id)
+        return None
+    except WorkspaceAccessDeniedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
 
 
 @router.get(
@@ -200,26 +236,37 @@ def list_incidents(
         int | None,
         Query(ge=0, description="Alternative alias for offset (0-based start index)."),
     ] = None,
+    workspace_id: Annotated[
+        uuid.UUID | None,
+        Query(description="Filter incidents belonging to a specific workspace UUID."),
+    ] = None,
     incident_service: IncidentService = Depends(get_incident_service),
     current_user: User = Depends(get_current_active_user),
 ) -> IncidentListResponse:
     """
-    List incidents owned by current user with optional search, filtering, sorting, and pagination via IncidentService.
+    List incidents owned by current user or team workspaces with optional search, filtering, sorting, and pagination.
     Supports both `offset` and `skip` query parameters.
     """
     effective_offset = skip if skip is not None else offset
-    items, total = incident_service.list_incidents(
-        search=search,
-        service_name=service_name,
-        environment=environment,
-        severity=severity,
-        status_filter=status_filter,
-        sort_by=sort_by,
-        order=order,
-        limit=limit,
-        offset=effective_offset,
-        owner_id=current_user.id,
-    )
+    try:
+        items, total = incident_service.list_incidents(
+            search=search,
+            service_name=service_name,
+            environment=environment,
+            severity=severity,
+            status_filter=status_filter,
+            sort_by=sort_by,
+            order=order,
+            limit=limit,
+            offset=effective_offset,
+            owner_id=current_user.id,
+            workspace_id=workspace_id,
+        )
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        )
     return IncidentListResponse(
         items=list(items),
         limit=limit,

@@ -15,9 +15,11 @@ Milestone 10: Production Readiness.
 from contextlib import asynccontextmanager
 import logging
 import time
+from typing import Any
 import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -34,12 +36,20 @@ from app.routers import incidents as incidents_router
 from app.routers import investigations as investigations_router
 from app.routers import jobs as jobs_router
 from app.routers import knowledge as knowledge_router
+from app.routers import webhooks as webhooks_router
+from app.routers import workspaces as workspaces_router
 from app.services.incident_service import (
     IncidentConflictError,
     IncidentDatabaseError,
     IncidentInvalidTransitionError,
     IncidentNotFoundError,
     IncidentValidationError,
+)
+from app.services.rbac import (
+    DuplicateMemberError,
+    LastAdminError,
+    WorkspaceAccessDeniedError,
+    WorkspaceNotFoundError,
 )
 from app.services.user_service import (
     InvalidCredentialsError,
@@ -195,6 +205,24 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 
 
+def _sanitize_validation_errors(errors: list[Any]) -> list[Any]:
+    sanitized = []
+    for err in errors:
+        if isinstance(err, dict):
+            clean_err = {}
+            for k, v in err.items():
+                if k == "ctx" and isinstance(v, dict):
+                    clean_err[k] = {ck: str(cv) if isinstance(cv, (Exception, type)) else cv for ck, cv in v.items()}
+                elif isinstance(v, Exception):
+                    clean_err[k] = str(v)
+                else:
+                    clean_err[k] = v
+            sanitized.append(clean_err)
+        else:
+            sanitized.append(str(err))
+    return sanitized
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
@@ -208,10 +236,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     if not req_id or req_id == "-":
         req_id = str(uuid.uuid4())
     logger.warning("Request validation error on %s %s: %s", request.method, request.url.path, exc.errors())
+    sanitized_errors = jsonable_encoder(
+        _sanitize_validation_errors(exc.errors()),
+        custom_encoder={Exception: str},
+    )
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
-            "detail": exc.errors(),
+            "detail": sanitized_errors,
             "request_id": req_id,
         },
         headers={"X-Request-ID": req_id},
@@ -403,6 +435,46 @@ async def user_inactive_handler(request: Request, exc: UserInactiveError):
     )
 
 
+@app.exception_handler(WorkspaceNotFoundError)
+async def workspace_not_found_handler(request: Request, exc: WorkspaceNotFoundError):
+    req_id = getattr(request.state, "request_id", None) or str(uuid.uuid4())
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={"detail": str(exc), "request_id": req_id},
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(WorkspaceAccessDeniedError)
+async def workspace_access_denied_handler(request: Request, exc: WorkspaceAccessDeniedError):
+    req_id = getattr(request.state, "request_id", None) or str(uuid.uuid4())
+    return JSONResponse(
+        status_code=status.HTTP_403_FORBIDDEN,
+        content={"detail": str(exc), "request_id": req_id},
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(LastAdminError)
+async def last_admin_handler(request: Request, exc: LastAdminError):
+    req_id = getattr(request.state, "request_id", None) or str(uuid.uuid4())
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"detail": str(exc), "request_id": req_id},
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(DuplicateMemberError)
+async def duplicate_member_handler(request: Request, exc: DuplicateMemberError):
+    req_id = getattr(request.state, "request_id", None) or str(uuid.uuid4())
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": str(exc), "request_id": req_id},
+        headers={"X-Request-ID": req_id},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Global Safe Exception Handler
 # ---------------------------------------------------------------------------
@@ -449,7 +521,19 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(auth_router.router)
 app.include_router(auth_router.router, prefix="/api/v1")
 
-# Incidents API (Milestone 14: Protected by JWT Bearer token & owner-scoped)
+# Team Workspaces API (Milestone 17: Multi-tenant RBAC Workspaces)
+app.include_router(
+    workspaces_router.router,
+    prefix="/api/v1",
+)
+
+# Inbound Webhooks API (Milestone 19: Datadog & PagerDuty Alert Ingestion)
+app.include_router(
+    webhooks_router.router,
+    prefix="/api/v1",
+)
+
+# Incidents API (Milestone 14 & 17: Protected by JWT Bearer token & owner/workspace-scoped)
 app.include_router(
     incidents_router.router,
     prefix="/api/v1",
