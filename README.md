@@ -940,6 +940,115 @@ TraceMind AI provides a clean mode separation via the `DEMO_MODE` environment va
 - Milestone 10: Production Readiness & Containerized Operations (Completed)
 - Milestone 11: End-to-End Testing & Failure Recovery (Completed)
 - Zero-Budget Deployment Mode (Completed)
+- Milestone 12: Production-Ready Backend Architecture & Service Layer (Completed)
+- Milestone 13: Incident Lifecycle, Workflow, Search & Filtering (Completed)
+- Milestone 14: JWT Authentication, User Accounts & Incident Ownership (Completed)
+- Milestone 15: Production Logging, Configuration & Observability (Completed)
+
+---
+
+## Milestone 15 — Production Logging, Configuration & Observability
+
+TraceMind AI features centralized configuration, structured JSON logging, distributed request tracing, safe error masking, multi-tier health monitoring, and in-memory operational metrics.
+
+### 1. Configuration & Settings Management
+
+Configuration is loaded from environment variables via Pydantic Settings (`app/config.py`).
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `ENVIRONMENT` | string | `development` | Target runtime: `development`, `testing`, `staging`, `production`. |
+| `LOG_LEVEL` | string | `INFO` | Standard log levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
+| `LOG_FORMAT` | string | `json` | Logging format: `json` (production structured logs) or `text` (human-readable console). |
+| `TRACEMIND_API_KEY`| string | - | Service API key (validated: ≥16 chars, non-placeholder in prod/staging). |
+| `JWT_SECRET_KEY` | string | - | JWT signature secret (validated: ≥32 chars in prod/staging). |
+| `DATABASE_URL` | string | - | PostgreSQL connection URL (`postgresql+psycopg://...`). |
+| `DB_POOL_SIZE` | int | `10` | SQLAlchemy connection pool size. |
+| `DB_MAX_OVERFLOW`| int | `20` | Max overflow connections beyond pool size. |
+| `DB_POOL_TIMEOUT` | int | `30` | Pool checkout timeout in seconds. |
+| `DB_POOL_RECYCLE` | int | `1800` | Connection recycling interval in seconds. |
+
+> **Security Note:** Configuration validation errors omit raw passwords and secret tokens to prevent credentials from leaking into terminal dumps or log files.
+
+---
+
+### 2. Request Correlation (`X-Request-ID`)
+
+Every incoming request is tagged with an `X-Request-ID`:
+1. If the client supplies an `X-Request-ID` header matching `^[a-zA-Z0-9_\-\.]{1,64}$`, it is preserved.
+2. If omitted, malformed, or exceeding 64 characters, a new UUIDv4 is generated.
+3. The sanitized request ID is set in the Python context (`contextvars`) for automatic logger enrichment.
+4. Downstream error responses and successful HTTP responses always return the `X-Request-ID` header.
+
+Example response header:
+```http
+X-Request-ID: c5a92911-37f9-4b68-b769-cf30c4dd5a20
+```
+
+---
+
+### 3. Structured Logging & Secret Redaction
+
+TraceMind AI configures Python's standard `logging` library at application startup (`app/logging_config.py`).
+- **Production (`LOG_FORMAT=json`):** Emits single-line JSON logs with timestamp, log level, logger, request ID, and message:
+  ```json
+  {"timestamp": "2026-10-22T08:00:00.123456+00:00", "level": "INFO", "logger": "app.main", "request_id": "c5a92911-37f9-4b68-b769-cf30c4dd5a20", "message": "GET /api/v1/incidents -> 200 (14.20 ms)"}
+  ```
+- **Quiet Health Probes:** Routine health probes (`/health`, `/health/db`, `/ready`, `/metrics`) returning HTTP 200 are logged at `DEBUG` level to prevent log pollution.
+- **Automated Secret Redaction:** All log messages pass through `RedactingFilter`, redacting:
+  - Groq keys (`gsk_...` -> `[REDACTED_GROQ_KEY]`)
+  - OpenAI / service keys (`sk-...`, `tm_live_...` -> `[REDACTED_API_KEY]`)
+  - Bearer tokens (`Authorization: Bearer ...` -> `Bearer [REDACTED_TOKEN]`)
+  - Raw JWT strings (`eyJ...` -> `[REDACTED_JWT]`)
+  - PostgreSQL passwords in connection URLs (`user:pass@` -> `user:***@`)
+  - Sensitive JSON fields (`password`, `hashed_password` -> `"[REDACTED]"`)
+
+---
+
+### 4. Health, Readiness & Metrics Endpoints
+
+TraceMind AI separates liveness, readiness, and operational telemetry:
+
+| Endpoint | Method | Auth | Purpose |
+|---|---|:---:|---|
+| `/health` | `GET` | Public | **Liveness Probe**: Confirms the FastAPI process is running without querying PostgreSQL or Redis. Returns `200 OK`. |
+| `/ready` | `GET` | Public | **Readiness Probe**: Verifies connectivity to PostgreSQL (`SELECT 1`). Returns `200 OK` or `503 Service Unavailable`. |
+| `/health/db`| `GET` | Public | **Legacy DB Probe**: Backward-compatible database check. Returns `200 OK` or `503 Service Unavailable`. |
+| `/metrics` | `GET` | Public | **Operational Metrics**: In-memory telemetry (request count, error rates, average latency, status code histogram, uptime). |
+
+#### Diagnosing a Failed Readiness Check (`503 Service Unavailable`)
+
+If `GET /ready` returns `503`:
+```json
+{
+  "status": "unhealthy",
+  "database": "unreachable",
+  "redis": "healthy"
+}
+```
+1. **Verify PostgreSQL status:** Ensure the PostgreSQL service or container is active:
+   ```powershell
+   Get-Service -Name postgresql*
+   # or docker compose ps
+   ```
+2. **Verify connection credentials in `.env`:** Ensure `DATABASE_URL` matches your local port and password.
+3. **Check connection timeout / firewall:** Ensure host `127.0.0.1:5432` is reachable and not blocked.
+4. Note: Health and readiness endpoints never return connection strings, credentials, or internal stack traces to clients.
+
+---
+
+### 5. Running Automated Tests
+
+To run the complete test suite:
+```powershell
+.venv\Scripts\pytest
+```
+
+To run logging, configuration, and readiness tests:
+```powershell
+.venv\Scripts\pytest tests/test_logging.py tests/test_config.py tests/test_readiness.py tests/test_health.py -v
+```
+
 
 
 

@@ -19,11 +19,11 @@ Design Decisions
    1-to-many relationship via `events.incident_id` foreign key.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import uuid
 
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,8 +33,19 @@ from app.database import Base
 class IncidentStatus(str, Enum):
     """Lifecycle states of an incident."""
     OPEN = "OPEN"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
+    INVESTIGATING = "INVESTIGATING"
+    ACKNOWLEDGED = "ACKNOWLEDGED"  # Backward-compatible alias for INVESTIGATING
     RESOLVED = "RESOLVED"
+    CLOSED = "CLOSED"
+
+    @classmethod
+    def _missing_(cls, value: object):
+        if isinstance(value, str):
+            val_clean = value.strip().upper()
+            for member in cls:
+                if member.value == val_clean:
+                    return member
+        return None
 
 
 class Incident(Base):
@@ -134,16 +145,25 @@ class Incident(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        default=func.now(),
+        default=lambda: datetime.now(timezone.utc),
         nullable=False,
+        index=True,
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        default=func.now(),
-        onupdate=func.now(),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
+    )
+
+    # Foreign key to user account owning this incident (nullable for legacy/system correlation)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     # 1-to-many relationship: an incident has many events
@@ -151,6 +171,9 @@ class Incident(Base):
 
     # 1-to-many relationship: an incident can have multiple investigation jobs
     investigation_jobs = relationship("InvestigationJob", back_populates="incident", lazy="select")
+
+    # User relationship
+    owner = relationship("User", back_populates="incidents", lazy="select")
 
     def __repr__(self) -> str:
         return (

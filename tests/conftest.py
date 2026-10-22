@@ -35,10 +35,15 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
+from app.models.user import User
+from app.security import create_access_token, hash_password
 
 # ---------------------------------------------------------------------------
 # Test database — in-memory SQLite
 # ---------------------------------------------------------------------------
+
+import sqlite3
+sqlite3.register_adapter(uuid.UUID, lambda u: str(u))
 
 SQLITE_URL = "sqlite:///:memory:"
 
@@ -57,6 +62,9 @@ TestingSessionLocal = sessionmaker(
     expire_on_commit=False,
 )
 
+DEFAULT_TEST_USER_ID = uuid.UUID("a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d")
+DEFAULT_TEST_USER_EMAIL = "testuser@example.com"
+DEFAULT_AUTH_TOKEN = create_access_token(data={"sub": str(DEFAULT_TEST_USER_ID), "email": DEFAULT_TEST_USER_EMAIL})
 
 # ---------------------------------------------------------------------------
 # Table setup — once per test SESSION
@@ -71,6 +79,21 @@ def create_test_tables():
     *throwaway* test DB, not production schema management.
     """
     Base.metadata.create_all(bind=test_engine)
+    with TestingSessionLocal() as session:
+        user = session.get(User, DEFAULT_TEST_USER_ID)
+        if not user:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            user = User(
+                id=DEFAULT_TEST_USER_ID,
+                email=DEFAULT_TEST_USER_EMAIL,
+                hashed_password=hash_password("TestPassword123!"),
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(user)
+            session.commit()
     yield
     Base.metadata.drop_all(bind=test_engine)
 
@@ -93,7 +116,7 @@ app.dependency_overrides[get_db] = override_get_db
 
 
 # ---------------------------------------------------------------------------
-# Authentication test configuration (Milestone 5)
+# Authentication test configuration (Milestone 5 & 14)
 # ---------------------------------------------------------------------------
 
 TEST_API_KEY = "test-secret-key-12345"
@@ -127,12 +150,16 @@ celery_app.conf.update(
 def client() -> Generator[TestClient, None, None]:
     """
     HTTP test client backed by the SQLite override and authenticated
-    with the default test API key header (X-API-Key).
+    with the default test API key header (X-API-Key) and Bearer token.
 
     ``scope="module"`` — one client per test file. Data written by one
     test is visible to subsequent tests in the same module.
     """
-    with TestClient(app, headers={"X-API-Key": TEST_API_KEY}) as c:
+    headers = {
+        "X-API-Key": TEST_API_KEY,
+        "Authorization": f"Bearer {DEFAULT_AUTH_TOKEN}",
+    }
+    with TestClient(app, headers=headers) as c:
         yield c
 
 

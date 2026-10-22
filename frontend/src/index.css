@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-sre-950 text-slate-100 antialiased selection:bg-cyan-500/30 selection:text-cyan-200;
+  }
+
+  /* Custom scrollbar for dark SRE console */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0c121d;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #23334d;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #33486a;
+  }
+}

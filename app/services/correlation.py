@@ -124,6 +124,7 @@ def correlate_event_to_incident(session: Session, event: Event) -> Incident | No
             Incident.status.in_([
                 IncidentStatus.OPEN.value,
                 IncidentStatus.ACKNOWLEDGED.value,
+                IncidentStatus.INVESTIGATING.value,
             ]),
             Incident.last_seen_at >= window_cutoff,
         )

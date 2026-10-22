@@ -18,6 +18,7 @@ import time
 import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -25,12 +26,26 @@ from app.auth import verify_api_key
 from app.celery_app import check_redis_connection
 from app.config import get_settings
 from app.database import check_db_connection
-from app.logging_config import request_id_ctx, setup_logging
+from app.logging_config import request_id_ctx, sanitize_request_id, setup_logging
+from app.metrics import get_metrics_snapshot, record_request_metric
+from app.routers import auth as auth_router
 from app.routers import events as events_router
 from app.routers import incidents as incidents_router
 from app.routers import investigations as investigations_router
 from app.routers import jobs as jobs_router
 from app.routers import knowledge as knowledge_router
+from app.services.incident_service import (
+    IncidentConflictError,
+    IncidentDatabaseError,
+    IncidentInvalidTransitionError,
+    IncidentNotFoundError,
+    IncidentValidationError,
+)
+from app.services.user_service import (
+    InvalidCredentialsError,
+    UserAlreadyExistsError,
+    UserInactiveError,
+)
 
 settings = get_settings()
 setup_logging(level=settings.LOG_LEVEL, log_format=settings.LOG_FORMAT)
@@ -51,11 +66,39 @@ async def lifespan(app: FastAPI):
     logger.info("TraceMind AI shutting down.")
 
 
+tags_metadata = [
+    {
+        "name": "Authentication",
+        "description": "User registration, login, JWT token issuance, and profile management.",
+    },
+    {
+        "name": "incidents",
+        "description": "Deterministic incident grouping, management, and lifecycle workflow.",
+    },
+    {
+        "name": "events",
+        "description": "Ingest and query error events.",
+    },
+    {
+        "name": "investigations",
+        "description": "AI-powered root-cause investigation jobs.",
+    },
+    {
+        "name": "knowledge",
+        "description": "Runbook ingestion and semantic vector retrieval.",
+    },
+    {
+        "name": "jobs",
+        "description": "Asynchronous background task status polling.",
+    },
+]
+
 app = FastAPI(
     title="TraceMind AI",
     version="0.1.0",
     description="AI-powered software incident investigation platform.",
     lifespan=lifespan,
+    openapi_tags=tags_metadata,
 )
 
 # ---------------------------------------------------------------------------
@@ -83,15 +126,13 @@ app.add_middleware(
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
     """
-    Extract or generate X-Request-ID and inject it into the logging contextvar.
+    Extract, sanitize, or generate X-Request-ID and inject it into logging contextvar.
     Emits access log line with latency and status code.
-    Catches unhandled exceptions to ensure safe 500 responses retain the correlation ID.
+    Quiets successful health check probes at DEBUG level to reduce production log noise.
+    Records operational metrics and catches unhandled exceptions to return safe 500s.
     """
-    req_id = (
-        request.headers.get("X-Request-ID")
-        or request.headers.get("x-request-id")
-        or str(uuid.uuid4())
-    )
+    raw_incoming = request.headers.get("X-Request-ID") or request.headers.get("x-request-id")
+    req_id = sanitize_request_id(raw_incoming)
     request.state.request_id = req_id
     request.scope["request_id"] = req_id
     token = request_id_ctx.set(req_id)
@@ -99,39 +140,267 @@ async def request_id_middleware(request: Request, call_next):
 
     try:
         response = await call_next(request)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-        logger.error(
-            "Unhandled server exception during %s %s: %s (%.2f ms)",
-            request.method,
-            request.url.path,
-            exc,
-            latency_ms,
-            exc_info=True,
-        )
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "detail": "Internal server error. Please contact system support.",
-                "request_id": req_id,
-            },
-            headers={"X-Request-ID": req_id},
-        )
     finally:
         request_id_ctx.reset(token)
 
     latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
     response.headers["X-Request-ID"] = req_id
-    logger.info(
-        "%s %s -> %d (%.2f ms)",
-        request.method,
-        request.url.path,
-        response.status_code,
-        latency_ms,
-    )
+    record_request_metric(request.method, request.url.path, response.status_code, latency_ms)
+
+    # Quiet successful routine health probes to avoid noisy log spam
+    is_health_probe = request.url.path in ("/health", "/health/db", "/ready", "/metrics")
+    if is_health_probe and response.status_code == 200:
+        logger.debug(
+            "%s %s -> %d (%.2f ms)",
+            request.method,
+            request.url.path,
+            response.status_code,
+            latency_ms,
+        )
+    else:
+        logger.info(
+            "%s %s -> %d (%.2f ms)",
+            request.method,
+            request.url.path,
+            response.status_code,
+            latency_ms,
+        )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Centralized Error Handlers
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Standardize all HTTP exceptions with correlation request_id in headers.
+    Preserves existing response structure and response headers (such as WWW-Authenticate).
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    headers = dict(exc.headers) if exc.headers else {}
+    headers["X-Request-ID"] = req_id
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=headers,
+    )
+
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Standardize schema validation errors with correlation request_id.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    logger.warning("Request validation error on %s %s: %s", request.method, request.url.path, exc.errors())
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": exc.errors(),
+            "request_id": req_id,
+        },
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(IncidentNotFoundError)
+async def incident_not_found_handler(request: Request, exc: IncidentNotFoundError):
+    """
+    Centralized handler for IncidentNotFoundError -> HTTP 404.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={
+            "detail": str(exc),
+            "request_id": req_id,
+        },
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(IncidentConflictError)
+async def incident_conflict_handler(request: Request, exc: IncidentConflictError):
+    """
+    Centralized handler for IncidentConflictError -> HTTP 409.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "detail": str(exc),
+            "request_id": req_id,
+        },
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(IncidentDatabaseError)
+async def incident_database_error_handler(request: Request, exc: IncidentDatabaseError):
+    """
+    Centralized handler for IncidentDatabaseError -> HTTP 500 without leaking SQL.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    logger.error("Incident database error: %s [req_id=%s]", exc, req_id)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "detail": "A database error occurred. Please contact system support.",
+            "request_id": req_id,
+        },
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(IncidentValidationError)
+async def incident_validation_error_handler(request: Request, exc: IncidentValidationError):
+    """
+    Centralized handler for IncidentValidationError -> HTTP 422.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    logger.warning("Incident validation error: %s [req_id=%s]", exc, req_id)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": str(exc),
+            "request_id": req_id,
+        },
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(IncidentInvalidTransitionError)
+async def incident_invalid_transition_handler(request: Request, exc: IncidentInvalidTransitionError):
+    """
+    Centralized handler for IncidentInvalidTransitionError -> HTTP 400 Bad Request.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    logger.warning("Invalid incident status transition: %s [req_id=%s]", exc, req_id)
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "detail": str(exc),
+            "request_id": req_id,
+        },
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(UserAlreadyExistsError)
+async def user_already_exists_handler(request: Request, exc: UserAlreadyExistsError):
+    """
+    Centralized handler for UserAlreadyExistsError -> HTTP 409 Conflict.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    logger.warning("User registration conflict: %s [req_id=%s]", exc, req_id)
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "detail": str(exc),
+            "request_id": req_id,
+        },
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(InvalidCredentialsError)
+async def invalid_credentials_handler(request: Request, exc: InvalidCredentialsError):
+    """
+    Centralized handler for InvalidCredentialsError -> HTTP 401 Unauthorized with Bearer header.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    logger.warning("Authentication failure: %s [req_id=%s]", exc, req_id)
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={
+            "detail": str(exc),
+            "request_id": req_id,
+        },
+        headers={
+            "X-Request-ID": req_id,
+            "WWW-Authenticate": "Bearer",
+        },
+    )
+
+
+@app.exception_handler(UserInactiveError)
+async def user_inactive_handler(request: Request, exc: UserInactiveError):
+    """
+    Centralized handler for UserInactiveError -> HTTP 403 Forbidden.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    logger.warning("Inactive user access attempt: %s [req_id=%s]", exc, req_id)
+    return JSONResponse(
+        status_code=status.HTTP_403_FORBIDDEN,
+        content={
+            "detail": str(exc),
+            "request_id": req_id,
+        },
+        headers={"X-Request-ID": req_id},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +444,18 @@ async def global_exception_handler(request: Request, exc: Exception):
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
-# Events, jobs, incidents, investigations, and knowledge routers are mounted under /api/v1
+
+# Authentication endpoints (Milestone 14: /auth/* and /api/v1/auth/*)
+app.include_router(auth_router.router)
+app.include_router(auth_router.router, prefix="/api/v1")
+
+# Incidents API (Milestone 14: Protected by JWT Bearer token & owner-scoped)
+app.include_router(
+    incidents_router.router,
+    prefix="/api/v1",
+)
+
+# Events, jobs, investigations, and knowledge routers are mounted under /api/v1
 # and protected with the verify_api_key security dependency.
 app.include_router(
     events_router.router,
@@ -184,11 +464,6 @@ app.include_router(
 )
 app.include_router(
     jobs_router.router,
-    prefix="/api/v1",
-    dependencies=[Depends(verify_api_key)],
-)
-app.include_router(
-    incidents_router.router,
     prefix="/api/v1",
     dependencies=[Depends(verify_api_key)],
 )
@@ -257,3 +532,14 @@ async def readiness_check() -> JSONResponse:
         "redis": redis_status,
     }
     return JSONResponse(status_code=status_code, content=content)
+
+
+@app.get("/metrics", tags=["ops"])
+async def get_metrics() -> dict[str, Any]:
+    """
+    Lightweight operational telemetry endpoint.
+    Returns request counts, 4xx/5xx error rates, uptime, and latency statistics.
+    Never exposes internal secrets or database credentials.
+    """
+    return get_metrics_snapshot()
+

@@ -25,16 +25,39 @@ import logging
 import re
 import sys
 from typing import Any, Dict
+import uuid
 
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
+
+# Safe request ID validation pattern: 1 to 64 alphanumeric characters, underscores, hyphens, and dots
+REQUEST_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.]{1,64}$")
+
+
+def sanitize_request_id(incoming: str | None) -> str:
+    """
+    Validate and sanitize an incoming request ID.
+
+    Accepts alphanumeric, hyphen, underscore, and dot characters with length 1 to 64.
+    If the incoming value is missing, exceeds 64 characters, or contains invalid characters,
+    generates a clean UUIDv4.
+    """
+    if incoming and isinstance(incoming, str):
+        trimmed = incoming.strip()
+        if 1 <= len(trimmed) <= 64 and REQUEST_ID_REGEX.match(trimmed):
+            return trimmed
+    return str(uuid.uuid4())
+
 
 # Regex patterns for sensitive data redaction
 REDACTION_PATTERNS = [
     (re.compile(r"(gsk_[a-zA-Z0-9]{30,})"), "[REDACTED_GROQ_KEY]"),
     (re.compile(r"(sk-[a-zA-Z0-9]{20,})"), "[REDACTED_API_KEY]"),
     (re.compile(r"(Bearer\s+)[a-zA-Z0-9_\-\.]{15,}", re.IGNORECASE), r"\1[REDACTED_TOKEN]"),
+    (re.compile(r"(eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})"), "[REDACTED_JWT]"),
     (re.compile(r"(X-API-Key:\s*)[^\s,]+", re.IGNORECASE), r"\1[REDACTED_KEY]"),
     (re.compile(r"(postgresql\+[a-z0-9]+://[^:]+:)([^@]+)(@)", re.IGNORECASE), r"\1***\3"),
+    (re.compile(r'(["\']?password["\']?\s*[:=]\s*["\'])([^"\']*)(["\'])', re.IGNORECASE), r"\1[REDACTED]\3"),
+    (re.compile(r'(["\']?hashed_password["\']?\s*[:=]\s*["\'])([^"\']*)(["\'])', re.IGNORECASE), r"\1[REDACTED]\3"),
     (re.compile(r"password=([^\s&]+)", re.IGNORECASE), "password=[REDACTED]"),
 ]
 

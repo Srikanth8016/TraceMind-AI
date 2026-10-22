@@ -11,6 +11,7 @@ from app.models.incident import Incident, IncidentStatus
 from app.models.investigation import InvestigationJob, InvestigationStatus
 from app.models.job import JobStatus, ProcessingJob
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from app.models.user import User
 
 __all__ = [
     "Event",
@@ -22,5 +23,6 @@ __all__ = [
     "KnowledgeChunk",
     "KnowledgeDocument",
     "ProcessingJob",
+    "User",
 ]
 

@@ -33,7 +33,7 @@ from app.services.fingerprint import (
     generate_fingerprint,
     normalize_error_message,
 )
-from tests.conftest import TEST_API_KEY, VALID_PAYLOAD
+from tests.conftest import DEFAULT_TEST_USER_ID, TEST_API_KEY, VALID_PAYLOAD
 
 
 # ===========================================================================
@@ -392,6 +392,7 @@ class TestIncidentsAPIEndpoints:
                 first_seen_at=now,
                 last_seen_at=now,
                 event_count=5,
+                owner_id=DEFAULT_TEST_USER_ID,
             )
             db.add(inc)
             db.commit()
@@ -432,6 +433,7 @@ class TestIncidentsAPIEndpoints:
                 first_seen_at=now,
                 last_seen_at=now,
                 event_count=3,
+                owner_id=DEFAULT_TEST_USER_ID,
             )
             db.add(inc)
             db.commit()
@@ -471,6 +473,7 @@ class TestIncidentsAPIEndpoints:
                 first_seen_at=now,
                 last_seen_at=now,
                 event_count=2,
+                owner_id=DEFAULT_TEST_USER_ID,
             )
             db.add(inc)
 

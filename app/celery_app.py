@@ -64,7 +64,7 @@ def check_redis_connection(timeout: float = 2.0) -> bool:
     Returns True if healthy, False if unreachable or errored.
     """
     # If in eager test mode without Redis configured, consider ready
-    if CELERY_TASK_ALWAYS_EAGER and not os.environ.get("CELERY_BROKER_URL"):
+    if celery_app.conf.task_always_eager or (CELERY_TASK_ALWAYS_EAGER and not os.environ.get("CELERY_BROKER_URL")):
         return True
     try:
         r = redis.Redis.from_url(CELERY_BROKER_URL, socket_timeout=timeout, socket_connect_timeout=timeout)

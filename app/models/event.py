@@ -26,6 +26,7 @@ Column design
                   this automatically; the application never sets it explicitly.
 """
 
+from datetime import datetime, timezone
 import uuid
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
@@ -99,7 +100,7 @@ class Event(Base):
         # ``server_default`` tells SQLAlchemy NOT to include this column in
         # INSERT statements — PostgreSQL fills it automatically.
         # ``default`` is the Python-side fallback used by SQLite in tests.
-        default=func.now(),
+        default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
 

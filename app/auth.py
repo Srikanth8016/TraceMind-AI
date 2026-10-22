@@ -18,8 +18,20 @@ Design principles
 
 import os
 import secrets
-from fastapi import HTTPException, Security, status
-from fastapi.security import APIKeyHeader
+import uuid
+
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models.user import User
+from app.security import (
+    TokenError,
+    TokenExpiredError,
+    TokenInvalidError,
+    decode_access_token,
+)
 
 # ---------------------------------------------------------------------------
 # OpenAPI Security Scheme
@@ -91,3 +103,91 @@ def verify_api_key(
         )
 
     return client_api_key
+
+
+# ---------------------------------------------------------------------------
+# JWT Bearer Token Security Scheme (Milestone 14)
+# ---------------------------------------------------------------------------
+
+http_bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="JWT Bearer token required for user authentication. Example: Bearer <token>",
+)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Security(http_bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    """
+    Retrieve the authenticated User model from the Bearer token.
+
+    Raises
+    ------
+    HTTPException(401)
+        If token is missing, malformed, expired, invalidly signed, or user not found.
+    """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing bearer authentication token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials.strip()
+    try:
+        payload = decode_access_token(token)
+    except TokenExpiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+    except (TokenInvalidError, TokenError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid, malformed, or improperly signed token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    user_id_str = payload.get("sub")
+    if not user_id_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token payload missing subject identifier.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        user_uuid = uuid.UUID(user_id_str)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Malformed user identifier in token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    user = db.get(User, user_uuid)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account associated with this token does not exist.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user
+
+
+def get_current_active_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """
+    FastAPI dependency that enforces the authenticated user account is active.
+    """
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Inactive user account.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return current_user

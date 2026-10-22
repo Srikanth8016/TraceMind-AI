@@ -129,6 +129,21 @@ class Settings(BaseModel):
     LOG_FORMAT: str = Field(default="json")  # 'json' or 'text'
     REQUEST_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1.0, le=300.0)
 
+    # JWT & User Authentication (Milestone 14)
+    JWT_SECRET_KEY: str = Field(
+        default="tracemind-default-production-safe-jwt-secret-key-32chars",
+        description="Secret key used for signing JWT access tokens.",
+    )
+    JWT_ALGORITHM: str = Field(
+        default="HS256",
+        description="Cryptographic algorithm for signing tokens (e.g. HS256).",
+    )
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=60,
+        ge=1,
+        description="Access token lifespan in minutes.",
+    )
+
     @model_validator(mode="before")
     @classmethod
     def load_from_env(cls, data: dict) -> dict:
@@ -147,6 +162,7 @@ class Settings(BaseModel):
                     "DB_POOL_RECYCLE",
                     "INCIDENT_CORRELATION_WINDOW_SECONDS",
                     "EMBEDDING_DIMENSION",
+                    "JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
                 ):
                     try:
                         env_dict[field_name] = int(val)
@@ -176,28 +192,49 @@ class Settings(BaseModel):
         elif self.DATABASE_URL.startswith("postgresql://"):
             self.DATABASE_URL = self.DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
+        # Validate LOG_LEVEL and LOG_FORMAT across all environments
+        self.LOG_LEVEL = self.LOG_LEVEL.upper()
+        self.LOG_FORMAT = self.LOG_FORMAT.lower()
+
+        allowed_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if self.LOG_LEVEL not in allowed_levels:
+            raise ValueError(f"Invalid LOG_LEVEL '{self.LOG_LEVEL}'. Allowed: {sorted(allowed_levels)}")
+
+        allowed_formats = {"json", "text"}
+        if self.LOG_FORMAT not in allowed_formats:
+            raise ValueError(f"Invalid LOG_FORMAT '{self.LOG_FORMAT}'. Allowed: {sorted(allowed_formats)}")
+
         if self.ENVIRONMENT in (AppEnvironment.PRODUCTION, AppEnvironment.STAGING):
-            # 1. API key must not be a known development placeholder
+            # 1. In standard production mode (non-demo), Celery task execution must not be eager
+            if not self.DEMO_MODE and self.CELERY_TASK_ALWAYS_EAGER:
+                raise ValueError(
+                    "Production configuration violation: CELERY_TASK_ALWAYS_EAGER cannot be True in production."
+                )
+
+            # 2. API key must not be a known development placeholder (no secret values in error message)
             if not self.TRACEMIND_API_KEY or self.TRACEMIND_API_KEY in DEV_PLACEHOLDER_KEYS:
                 raise ValueError(
-                    f"Production security violation: TRACEMIND_API_KEY cannot be empty or "
-                    f"set to an insecure placeholder ({self.TRACEMIND_API_KEY!r})."
+                    "Production security violation: TRACEMIND_API_KEY cannot be empty or set to an insecure placeholder."
                 )
             if len(self.TRACEMIND_API_KEY) < 16:
                 raise ValueError(
                     "Production security violation: TRACEMIND_API_KEY must be at least 16 characters long."
                 )
 
-            # 2. Production database should not point to localhost unless overridden
+            # 3. JWT Secret Key validation in production
+            if not self.JWT_SECRET_KEY or self.JWT_SECRET_KEY in ("replace-with-your-secure-random-jwt-secret-at-least-32-chars", ""):
+                raise ValueError(
+                    "Production security violation: JWT_SECRET_KEY cannot be empty or set to an insecure placeholder."
+                )
+            if len(self.JWT_SECRET_KEY) < 16:
+                raise ValueError(
+                    "Production security violation: JWT_SECRET_KEY must be at least 16 characters long."
+                )
+
+            # 4. Production database should not point to localhost unless overridden
             if "@localhost" in self.DATABASE_URL or "@127.0.0.1" in self.DATABASE_URL:
                 # Warning or check if running outside containers
                 pass
-
-            # 3. In standard production mode (non-demo), Celery task execution must not be eager
-            if not self.DEMO_MODE and self.CELERY_TASK_ALWAYS_EAGER:
-                raise ValueError(
-                    "Production configuration violation: CELERY_TASK_ALWAYS_EAGER cannot be True in production."
-                )
 
         return self
 
