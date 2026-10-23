@@ -46,9 +46,8 @@ services:
       - key: SLACK_NOTIFICATIONS_ENABLED
         value: "false"
 
-  - type: web
+  - type: static
     name: tracemind-ui
-    runtime: static
     plan: free
     region: oregon
     rootDir: frontend
