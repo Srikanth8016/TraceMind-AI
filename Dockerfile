@@ -37,6 +37,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY --chown=tracemind:tracemind alembic/ /app/alembic/
 COPY --chown=tracemind:tracemind alembic.ini /app/
 COPY --chown=tracemind:tracemind app/ /app/app/
+COPY --chown=tracemind:tracemind scripts/ /app/scripts/
 
 # Switch to unprivileged user
 USER tracemind

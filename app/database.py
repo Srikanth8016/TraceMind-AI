@@ -50,6 +50,7 @@ if not DATABASE_URL.startswith("sqlite"):
         "max_overflow": settings.DB_MAX_OVERFLOW,
         "pool_timeout": settings.DB_POOL_TIMEOUT,
         "pool_recycle": settings.DB_POOL_RECYCLE,
+        "connect_args": {"connect_timeout": 10},
     })
 
 engine = create_engine(DATABASE_URL, **engine_kwargs)

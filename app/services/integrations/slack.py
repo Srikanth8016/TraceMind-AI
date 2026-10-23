@@ -222,8 +222,14 @@ def execute_slack_delivery(
 ) -> None:
     """
     Perform external HTTP POST request to Slack incoming webhook.
+    Enforces SSRF prevention by verifying destination begins with 'https://hooks.slack.com/'.
     Raises SlackNotificationError on timeout, 4xx, or 5xx.
     """
+    if not webhook_url or not webhook_url.startswith("https://hooks.slack.com/"):
+        raise SlackNotificationError(
+            "SSRF protection violation: Slack webhook URL must start with 'https://hooks.slack.com/'"
+        )
+
     headers = {"Content-Type": "application/json"}
     try:
         response = httpx.post(

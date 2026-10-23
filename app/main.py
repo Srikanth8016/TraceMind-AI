@@ -23,6 +23,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError
 
 from app.auth import verify_api_key
 from app.celery_app import check_redis_connection
@@ -117,16 +118,42 @@ app = FastAPI(
 cors_origins = [orig.strip() for orig in settings.CORS_ORIGINS.split(",") if orig.strip()]
 if not cors_origins or "*" in cors_origins:
     allow_origins = ["*"]
+    allow_credentials = False  # W3C CORS spec: credentials cannot be used with wildcard '*' origin
 else:
     allow_origins = cors_origins
+    allow_credentials = True
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
-    allow_credentials=True,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Maximum request body size limit: 10 MB to prevent memory-exhaustion / DoS
+MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
+
+
+@app.middleware("http")
+async def payload_size_limit_middleware(request: Request, call_next):
+    """
+    Enforce global maximum payload size limit.
+    Returns HTTP 413 Payload Too Large if Content-Length exceeds MAX_REQUEST_BODY_BYTES.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                return JSONResponse(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    content={
+                        "detail": f"Request payload too large. Maximum allowed size is {MAX_REQUEST_BODY_BYTES // (1024 * 1024)}MB."
+                    },
+                )
+        except ValueError:
+            pass
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +498,30 @@ async def duplicate_member_handler(request: Request, exc: DuplicateMemberError):
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content={"detail": str(exc), "request_id": req_id},
+        headers={"X-Request-ID": req_id},
+    )
+
+
+@app.exception_handler(OperationalError)
+async def database_operational_error_handler(request: Request, exc: OperationalError):
+    """
+    Handle database connection timeouts or connectivity loss gracefully.
+    Returns HTTP 503 Service Unavailable with request correlation ID.
+    """
+    req_id = (
+        getattr(request.state, "request_id", None)
+        or request.scope.get("request_id")
+        or request_id_ctx.get("-")
+    )
+    if not req_id or req_id == "-":
+        req_id = str(uuid.uuid4())
+    logger.error("Database connection failure during %s %s: %s [req_id=%s]", request.method, request.url.path, exc, req_id)
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "detail": "Database service is temporarily unavailable or unreachable. Please try again shortly.",
+            "request_id": req_id,
+        },
         headers={"X-Request-ID": req_id},
     )
 

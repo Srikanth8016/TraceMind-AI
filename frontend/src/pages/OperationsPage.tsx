@@ -155,16 +155,16 @@ export const OperationsPage: React.FC = () => {
             />
             <StatCard
               label="Avg Latency"
-              value={`${metrics.avg_latency_ms.toFixed(1)} ms`}
+              value={`${(metrics.avg_latency_ms ?? 0).toFixed(1)} ms`}
               subtext="Monotonic request duration"
               color="green"
               icon={<TrendingDown className="w-5 h-5" />}
             />
             <StatCard
               label="Error Rate"
-              value={`${metrics.error_rate_pct.toFixed(2)}%`}
-              subtext={`${metrics.total_errors_4xx} 4xx | ${metrics.total_errors_5xx} 5xx`}
-              color={metrics.error_rate_pct > 5 ? 'red' : 'default'}
+              value={`${(metrics.error_rate_pct ?? (metrics.total_requests > 0 ? ((metrics.total_errors_4xx + metrics.total_errors_5xx) / metrics.total_requests) * 100 : 0)).toFixed(2)}%`}
+              subtext={`${metrics.total_errors_4xx ?? 0} 4xx | ${metrics.total_errors_5xx ?? 0} 5xx`}
+              color={(metrics.error_rate_pct ?? 0) > 5 ? 'red' : 'default'}
               icon={<AlertTriangle className="w-5 h-5" />}
             />
           </div>

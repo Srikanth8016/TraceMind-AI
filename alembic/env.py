@@ -30,7 +30,6 @@ load_dotenv()
 config = context.config
 
 # Inject the real DATABASE_URL from the environment, overriding the
-# placeholder in alembic.ini.  This way alembic.ini never contains secrets.
 database_url = os.environ.get("DATABASE_URL")
 if database_url:
     if database_url.startswith("postgres://"):
@@ -38,6 +37,13 @@ if database_url:
     elif database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
     config.set_main_option("sqlalchemy.url", database_url)
+else:
+    raw_url = config.get_main_option("sqlalchemy.url", "")
+    if "placeholder" in raw_url:
+        raise RuntimeError(
+            "DATABASE_URL environment variable is not configured. "
+            "Please configure DATABASE_URL in your deployment environment settings before running migrations."
+        )
 
 # Interpret the config file for Python logging if it has a [loggers] section.
 if config.config_file_name is not None:

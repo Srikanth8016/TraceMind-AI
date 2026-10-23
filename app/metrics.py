@@ -47,11 +47,18 @@ class MetricsState:
                 if self.total_requests > 0
                 else 0.0
             )
+            total_errors = self.total_errors_4xx + self.total_errors_5xx
+            error_rate_pct = (
+                round((total_errors / self.total_requests) * 100, 2)
+                if self.total_requests > 0
+                else 0.0
+            )
             return {
                 "uptime_seconds": uptime_seconds,
                 "total_requests": self.total_requests,
                 "total_errors_4xx": self.total_errors_4xx,
                 "total_errors_5xx": self.total_errors_5xx,
+                "error_rate_pct": error_rate_pct,
                 "avg_latency_ms": avg_latency_ms,
                 "status_counts": dict(self.status_counts),
             }
