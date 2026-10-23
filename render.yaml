@@ -45,18 +45,3 @@ services:
         sync: false
       - key: SLACK_NOTIFICATIONS_ENABLED
         value: "false"
-
-  - type: static
-    name: tracemind-ui
-    plan: free
-    region: oregon
-    rootDir: frontend
-    buildCommand: "npm install && npm run build"
-    publishPath: dist
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-    envVars:
-      - key: VITE_API_URL
-        value: "https://tracemind-ai-o3fd.onrender.com"
