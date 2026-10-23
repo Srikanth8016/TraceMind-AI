@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.exc import OperationalError
 
 from app.auth import verify_api_key
@@ -615,8 +615,14 @@ app.include_router(
 
 
 # ---------------------------------------------------------------------------
-# Health & Readiness Probes (Public / Unauthenticated)
+# Health, Root & Readiness Probes (Public / Unauthenticated)
 # ---------------------------------------------------------------------------
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """Redirect root to interactive API documentation."""
+    return RedirectResponse(url="/docs", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
 
 @app.get("/health", tags=["ops"])
 async def health_check() -> dict[str, str]:
