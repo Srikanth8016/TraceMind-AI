@@ -139,9 +139,13 @@ def search_relevant_chunks(
             return results
         except Exception as exc:
             logger.warning(
-                "PostgreSQL pgvector query failed (%s); falling back to in-memory evaluation.",
+                "PostgreSQL pgvector query failed (%s); rolling back and falling back to in-memory evaluation.",
                 exc,
             )
+            try:
+                session.rollback()
+            except Exception:
+                pass
 
     # In-memory evaluation fallback (standard for SQLite in test suites)
     stmt = (
